@@ -2,6 +2,24 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.15.3] - 2026-05-09
+
+### Added
+- **Kernel-level process attribution on macOS via PKTAP** — netwatch now opens xnu's `pktap` pseudo-device alongside the regular packet capture (when running with sudo) and harvests `(pid, comm, direction)` straight from the kernel for every captured frame. The Connections, Dashboard, Topology, Timeline, and Insights tabs all consume this attribution, so short-lived flows that close inside one lsof poll window — `curl` to a CDN, a DNS query, an mDNS announcement — now show the real owning process instead of `—`. Threaded processes whose `comm` differs from the parent get the actual thread name rather than the parent binary's. Falls back to the existing lsof/ss/netstat polling path when PKTAP can't be opened (no root, non-Apple libpcap, kernel feature missing); attribution source is tracked per-row via a new `AttributionSource` enum (`Lsof` default, `Pktap` after kernel overlay).
+- **`pktap_probe` example** — `sudo cargo run --example pktap_probe` prints attributed events as they arrive, useful for confirming PKTAP works on a given macOS build before turning on the full TUI.
+
+### Fixed
+- **PKTAP attribution on macOS 15+** — Apple renamed the libpcap symbol used to enable per-packet metadata: macOS 14 and earlier exported `pcap_set_want_pktap_pktmetadata`, macOS 15 dropped that and exports the shorter `pcap_set_want_pktap` instead. The dlsym lookup now probes both names so the same build picks up attribution across older and newer macOS without a recompile. Surfaced when the probe failed with `pcap_set_want_pktap_pktmetadata not found` on macOS 15.4.1.
+
+## [0.15.2] - 2026-05-07
+
+### Fixed
+- **Refresh-rate setting now hot-reloads** — Changing `Refresh Rate (ms)` in the Settings popup used to require a restart because `EventHandler` captured `tick_rate` once at construction. The polling thread now re-reads an `Arc<AtomicU64>` each iteration and a saved change takes effect on the next poll cycle.
+- **Filter-aware connection selection (#26)** — Under an active connection filter, `PgDn`-to-bottom left `connection_scroll` clamped against the *unfiltered* list while the table rendered the filtered list, so subsequent `UpArrow` looked stuck and mouse clicks on visible rows did nothing. All five clamp/select sites (PgDn, mouse click, `W`/`T`/`Enter` action handlers) now route through `connections::filtered_sorted_conns(app)` so the rendered view drives selection bounds.
+
+### Changed
+- **Dots graph style narrower per-sample** — One filled sub-column per sample window instead of both, with the area-fill below each sample's peak preserved. Gives the classic btop "comb" look with visible gaps between samples.
+
 ## [0.15.1] - 2026-05-05
 
 ### Fixed
