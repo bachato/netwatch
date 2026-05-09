@@ -103,21 +103,6 @@ Most network tools make you choose: **see what's happening** (iftop, bandwhich) 
 
 ---
 
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center"><strong>Dashboard</strong><br>Interfaces, bandwidth, health, top connections<br><img src="screenshots/dashboard.png" width="400"></td>
-    <td align="center"><strong>Connections</strong><br>Every socket with process name, PID, GeoIP<br><img src="screenshots/connections.png" width="400"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Interfaces</strong><br>Per-interface detail with sparkline history<br><img src="screenshots/interfaces.png" width="400"></td>
-    <td align="center"><strong>Topology</strong><br>Network map with health indicators + traceroute<br><img src="screenshots/topology.png" width="400"></td>
-  </tr>
-</table>
-
----
-
 ## Features
 
 ### 🖥️ Dashboard
