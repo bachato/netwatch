@@ -2,6 +2,11 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.15.7] - 2026-05-10
+
+### Fixed
+- **v0.15.6 release was broken** — the new "Build netwatch-sdk eBPF object" step in the release workflow tried to install the SDK's pinned nightly (`nightly-2026-01-15`) but rustup couldn't fetch `rust-std` for `bpfel-unknown-none` on that date (intermittent nightly-channel coverage gap). The first Linux build job failed and `fail-fast` cancelled everything else, so no v0.15.6 binaries shipped. v0.15.7 reverts the workflow's BPF build step; Linux release tarballs ship with the `ebpf` feature compiled in but the BPF object missing, so `EventSource::new` returns `BpfObjectMissing` at runtime and netwatch falls back to lsof/ss attribution. macOS PKTAP is unaffected. The actual BPF-shipping fix is now blocked on bumping the SDK's pinned nightly (and ideally the SDK starts shipping the pre-built `.o` on crates.io directly).
+
 ## [0.15.6] - 2026-05-10
 
 ### Added

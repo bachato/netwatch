@@ -128,29 +128,14 @@ jobs:
           Expand-Archive -Path npcap-sdk.zip -DestinationPath npcap-sdk
           echo "LIB=${{ github.workspace }}\npcap-sdk\Lib\x64" >> $env:GITHUB_ENV
 
-      # Build netwatch-sdk's BPF object so the SDK's `include_bytes!` finds
-      # a real artifact. Without this, Linux release tarballs would compile
-      # netwatch with the `ebpf` feature on but `EventSource::new` would
-      # return `BpfObjectMissing` at runtime → silent fallback to lsof.
-      # The patch.crates-io override only affects this job's build; the
-      # publish job has its own checkout and pulls the unpatched SDK from
-      # crates.io for `cargo publish`.
-      - name: Install bpf-linker (Linux)
-        if: runner.os == 'Linux'
-        run: cargo install bpf-linker --locked
-
-      - name: Build netwatch-sdk eBPF object (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          git clone --depth=1 https://github.com/matthart1983/netwatch-sdk.git "${RUNNER_TEMP}/netwatch-sdk"
-          (cd "${RUNNER_TEMP}/netwatch-sdk" && bash scripts/build-ebpf.sh)
-          # Override the crates.io netwatch-sdk with the local copy that has
-          # `target/bpf/netwatch_sdk_ebpf.o` populated. The SDK build.rs picks
-          # up that file and embeds it via `include_bytes!`. Using printf
-          # rather than a heredoc because the workflow YAML's leading-space
-          # indentation breaks <<EOF terminator detection.
-          printf '\n[patch.crates-io]\nnetwatch-sdk = { path = "%s/netwatch-sdk" }\n' \
-            "$RUNNER_TEMP" >> Cargo.toml
+      # NOTE: Building netwatch-sdk's BPF object in this workflow was attempted
+      # in v0.15.6 but the SDK's pinned nightly (2026-01-15) sometimes lacks
+      # `rust-std` for `bpfel-unknown-none`. Until the SDK rolls its toolchain
+      # pin forward (or starts shipping the pre-built BPF object on crates.io),
+      # the Linux release tarballs ship with the `ebpf` feature compiled in
+      # but the BPF object missing — `EventSource::new` returns
+      # `BpfObjectMissing` at runtime and netwatch falls back to lsof/ss
+      # attribution. macOS still uses PKTAP unaffected.
 
       - name: Build
         shell: bash
