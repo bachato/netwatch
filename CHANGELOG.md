@@ -2,6 +2,11 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.15.5] - 2026-05-10
+
+### Added
+- **Reliable QUIC SNI extraction (RFC 9001 + RFC 9369)** — The Packets tab now decrypts QUIC v1 and v2 Initial packets per the spec and surfaces the embedded TLS ClientHello's `server_name` extension on the row. Previously netwatch had a heuristic that scanned the Initial payload for a cleartext ClientHello pattern, which doesn't work because real Initials are AEAD-protected with keys derived from the Destination Connection ID; that heuristic always returned `—` on real-world traffic. The new implementation does the full HKDF-Expand-Label key derivation, AES-128 header protection removal (via `ring::aead::quic`), AES-128-GCM payload decryption, and CRYPTO frame reassembly. Verified against RFC 9001 Appendix A.1 (key derivation byte-match) and Appendix A.2 (full sample packet → `example.com` SNI). Lives in the new `src/collectors/quic.rs` module; `ring 0.17` promoted from transitive to direct dep.
+
 ## [0.15.4] - 2026-05-10
 
 ### Fixed
