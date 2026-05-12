@@ -100,36 +100,50 @@ pub fn dark() -> Theme {
     }
 }
 
-/// "Minimal" styling — leaves the panel background as `Color::Reset`
-/// (terminal default) and uses dark RGB text. Only legible when the
-/// terminal's own background is in a light mode, so it's intentionally
-/// scoped to users who pair netwatch with a light-themed terminal.
-/// For a self-contained light-themed UI that works regardless of the
-/// terminal's palette, use `paper` instead.
+/// "Minimal" styling — defers to the terminal's palette for everything
+/// body-related. Body text and chrome use `Color::Reset` (terminal
+/// default fg / bg), and only the semantic accents (status, rates,
+/// brand) use named ANSI colors. The terminal interprets those names
+/// against its own palette, so the theme reads correctly whether the
+/// terminal is in light or dark mode.
 ///
-/// Was named "light" historically; `by_name` still accepts the old
-/// alias so existing configs keep working.
+/// Previously named "light" with explicit dark RGB text colors that
+/// only worked against a light terminal background. `by_name` still
+/// accepts the old alias so saved configs keep working. For a
+/// self-contained light-themed UI that paints its own background,
+/// use `paper` instead.
 pub fn minimal() -> Theme {
     Theme {
         name: "minimal",
-        brand: Color::Rgb(0, 120, 180),
-        active_tab: Color::Rgb(180, 100, 0),
-        inactive_tab: Color::Rgb(140, 140, 140),
-        border: Color::Rgb(180, 180, 180),
-        separator: Color::Rgb(180, 180, 180),
-        text_primary: Color::Rgb(30, 30, 30),
-        text_secondary: Color::Rgb(80, 80, 80),
-        text_muted: Color::Rgb(140, 140, 140),
-        text_inverse: Color::White,
-        status_good: Color::Rgb(0, 140, 60),
-        status_warn: Color::Rgb(200, 140, 0),
-        status_error: Color::Rgb(200, 40, 40),
-        status_info: Color::Rgb(0, 120, 180),
-        rx_rate: Color::Rgb(0, 140, 60),
-        tx_rate: Color::Rgb(0, 90, 180),
-        key_hint: Color::Rgb(180, 100, 0),
-        selection_bg: Color::Rgb(220, 230, 240),
-        highlight_bg: Color::Rgb(200, 215, 230),
+        brand: Color::Cyan,
+        active_tab: Color::Yellow,
+        // Chrome uses DarkGray rather than Reset so borders + tab
+        // separators remain visible against the terminal bg without
+        // dominating the view. Terminals render DarkGray as their
+        // "bright black" (palette index 8), which is a subtle neutral
+        // on both light and dark themes.
+        inactive_tab: Color::DarkGray,
+        border: Color::DarkGray,
+        separator: Color::DarkGray,
+        // Text defers to terminal default fg. Inverse is intentionally
+        // Reset too — used only for badges that also set a bg, where
+        // we want the bg's contrast pair.
+        text_primary: Color::Reset,
+        text_secondary: Color::Reset,
+        text_muted: Color::DarkGray,
+        text_inverse: Color::Reset,
+        status_good: Color::Green,
+        status_warn: Color::Yellow,
+        status_error: Color::Red,
+        status_info: Color::Cyan,
+        rx_rate: Color::Green,
+        tx_rate: Color::Blue,
+        key_hint: Color::Yellow,
+        // Selection highlight uses DarkGray as a subtle row tint that
+        // works on both light and dark terminals without picking a
+        // specific RGB that would clash with one of them.
+        selection_bg: Color::DarkGray,
+        highlight_bg: Color::DarkGray,
         bg: Color::Reset,
     }
 }
