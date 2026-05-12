@@ -484,15 +484,25 @@ fn protocol_palette(label: &str, t: &crate::theme::Theme) -> Color {
 
 fn render_processes_breakdown(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let ranked = app.process_bandwidth.ranked();
-    let total: u64 = ranked.iter().map(|p| p.rx_bytes + p.tx_bytes).sum();
-    if total == 0 {
+    // process_bandwidth.ranked() is sorted by RX+TX combined for the
+    // Processes tab's default view. This panel says "by RX" so we re-sort
+    // locally and drop zero-RX entries — otherwise a TX-heavy process
+    // sneaks into the top 5 and shows as "<name> — 0 KB".
+    let mut by_rx: Vec<_> = app
+        .process_bandwidth
+        .ranked()
+        .iter()
+        .filter(|p| p.rx_bytes > 0)
+        .collect();
+    by_rx.sort_by(|a, b| b.rx_bytes.cmp(&a.rx_bytes));
+
+    if by_rx.is_empty() {
         render_breakdown_panel(f, app, area, "TOP PROCESSES  by RX", Vec::new());
         return;
     }
 
     let palette = process_palette(t);
-    let mut items: Vec<BreakdownItem> = ranked
+    let mut items: Vec<BreakdownItem> = by_rx
         .iter()
         .take(5)
         .enumerate()
@@ -504,10 +514,10 @@ fn render_processes_breakdown(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let other_bytes: u64 = ranked.iter().skip(5).map(|p| p.rx_bytes).sum();
+    let other_bytes: u64 = by_rx.iter().skip(5).map(|p| p.rx_bytes).sum();
     if other_bytes > 0 {
         items.push(BreakdownItem {
-            label: format!("others ({})", ranked.len().saturating_sub(5)),
+            label: format!("others ({})", by_rx.len().saturating_sub(5)),
             value: bytes_to_unit_value(other_bytes),
             unit: bytes_to_unit_str(other_bytes),
             color: t.text_muted,
