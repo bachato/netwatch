@@ -56,9 +56,10 @@ impl ProcessBandwidthCollector {
     }
 
     pub fn update(&mut self, connections: &[Connection], interfaces: &[InterfaceTraffic]) {
-        // Sum total interface bandwidth across all interfaces
-        let total_rx_rate: f64 = interfaces.iter().map(|i| i.rx_rate).sum();
-        let total_tx_rate: f64 = interfaces.iter().map(|i| i.tx_rate).sum();
+        // Interface bytes-since-startup form the denominator for the
+        // per-process byte allocation; per-process *rates* come from the
+        // connections themselves (populated by the packet-capture rate
+        // tracker), so interface rates are no longer used here.
         let raw_rx_bytes: u64 = interfaces.iter().map(|i| i.rx_bytes_total).sum();
         let raw_tx_bytes: u64 = interfaces.iter().map(|i| i.tx_bytes_total).sum();
 
@@ -67,9 +68,18 @@ impl ProcessBandwidthCollector {
         let total_rx_bytes = raw_rx_bytes.saturating_sub(baseline_rx);
         let total_tx_bytes = raw_tx_bytes.saturating_sub(baseline_tx);
 
-        // Count ESTABLISHED connections per process, keyed by (process_name, pid).
-        // While iterating, also track min kernel RTT per group.
+        // Aggregate per-(process, pid) state from the ESTABLISHED connections.
+        // Rates come from the packet capture path (conn.rx_rate / tx_rate are
+        // populated by RateState in connections.rs when a stream's bytes are
+        // moving). RTT is the min across the process's TCP conns. We previously
+        // allocated bytes by `count / total_count` which gave every process
+        // with the same connection count an identical RX/TX — a fictional
+        // model that misled users. Now bytes are allocated by *rate share*
+        // instead, so the panel only shows differential numbers when there's
+        // real per-connection rate data behind them.
         let mut process_conns: HashMap<(String, Option<u32>), u32> = HashMap::new();
+        let mut process_rx_rate: HashMap<(String, Option<u32>), f64> = HashMap::new();
+        let mut process_tx_rate: HashMap<(String, Option<u32>), f64> = HashMap::new();
         let mut process_rtt: HashMap<(String, Option<u32>), f64> = HashMap::new();
         let mut total_established: u32 = 0;
 
@@ -84,6 +94,12 @@ impl ProcessBandwidthCollector {
             let key = (name, conn.pid);
             *process_conns.entry(key.clone()).or_insert(0) += 1;
             total_established += 1;
+            if let Some(rx) = conn.rx_rate {
+                *process_rx_rate.entry(key.clone()).or_insert(0.0) += rx;
+            }
+            if let Some(tx) = conn.tx_rate {
+                *process_tx_rate.entry(key.clone()).or_insert(0.0) += tx;
+            }
             if let Some(rtt_us) = conn.kernel_rtt_us {
                 let rtt_ms = rtt_us / 1000.0;
                 process_rtt
@@ -102,21 +118,40 @@ impl ProcessBandwidthCollector {
             return;
         }
 
+        let total_proc_rx_rate: f64 = process_rx_rate.values().sum();
+        let total_proc_tx_rate: f64 = process_tx_rate.values().sum();
+
         let cpu_cache = self.cpu_cache.lock().unwrap().clone();
 
         let mut ranked: Vec<ProcessBandwidth> = process_conns
             .into_iter()
             .map(|((process_name, pid), count)| {
-                let fraction = count as f64 / total_established as f64;
-                let rtt_ms = process_rtt.get(&(process_name.clone(), pid)).copied();
+                let key = (process_name.clone(), pid);
+                let rx_rate = process_rx_rate.get(&key).copied().unwrap_or(0.0);
+                let tx_rate = process_tx_rate.get(&key).copied().unwrap_or(0.0);
+                // Allocate cumulative interface bytes by this process's
+                // rate share. When no rates exist (no packet capture path),
+                // every process gets 0 — honest "we don't know" rather
+                // than fake equal slices of the interface total.
+                let rx_bytes = if total_proc_rx_rate > 0.0 {
+                    (total_rx_bytes as f64 * (rx_rate / total_proc_rx_rate)) as u64
+                } else {
+                    0
+                };
+                let tx_bytes = if total_proc_tx_rate > 0.0 {
+                    (total_tx_bytes as f64 * (tx_rate / total_proc_tx_rate)) as u64
+                } else {
+                    0
+                };
+                let rtt_ms = process_rtt.get(&key).copied();
                 let cpu_percent = pid.and_then(|p| cpu_cache.get(&p).copied());
                 ProcessBandwidth {
                     process_name,
                     pid,
-                    rx_bytes: (total_rx_bytes as f64 * fraction) as u64,
-                    tx_bytes: (total_tx_bytes as f64 * fraction) as u64,
-                    rx_rate: total_rx_rate * fraction,
-                    tx_rate: total_tx_rate * fraction,
+                    rx_bytes,
+                    tx_bytes,
+                    rx_rate,
+                    tx_rate,
                     connection_count: count,
                     rtt_ms,
                     cpu_percent,
@@ -189,6 +224,16 @@ mod tests {
     use std::collections::VecDeque;
 
     fn make_conn(name: &str, pid: u32, state: &str) -> Connection {
+        make_conn_rated(name, pid, state, None, None)
+    }
+
+    fn make_conn_rated(
+        name: &str,
+        pid: u32,
+        state: &str,
+        rx: Option<f64>,
+        tx: Option<f64>,
+    ) -> Connection {
         Connection {
             protocol: "TCP".into(),
             local_addr: "127.0.0.1:8080".into(),
@@ -197,8 +242,8 @@ mod tests {
             pid: Some(pid),
             process_name: Some(name.into()),
             kernel_rtt_us: None,
-            rx_rate: None,
-            tx_rate: None,
+            rx_rate: rx,
+            tx_rate: tx,
             attribution: Default::default(),
         }
     }
@@ -237,9 +282,15 @@ mod tests {
     }
 
     #[test]
-    fn single_process_gets_all_bandwidth() {
+    fn single_process_gets_its_own_rate() {
         let mut collector = ProcessBandwidthCollector::new();
-        let conns = vec![make_conn("firefox", 100, "ESTABLISHED")];
+        let conns = vec![make_conn_rated(
+            "firefox",
+            100,
+            "ESTABLISHED",
+            Some(1000.0),
+            Some(500.0),
+        )];
         collector.update(&conns, &[make_interface(1000.0, 500.0)]);
         assert_eq!(collector.ranked().len(), 1);
         let p = &collector.ranked()[0];
@@ -250,16 +301,18 @@ mod tests {
     }
 
     #[test]
-    fn bandwidth_split_proportionally() {
+    fn rates_aggregated_per_process_from_per_connection_rates() {
+        // Three firefox connections (300/200/100 rx) + one curl (250 rx).
+        // Real aggregation should give firefox 600, curl 250 — not equal
+        // shares of the interface total like the old count-fraction model.
         let mut collector = ProcessBandwidthCollector::new();
         let conns = vec![
-            make_conn("firefox", 100, "ESTABLISHED"),
-            make_conn("firefox", 100, "ESTABLISHED"),
-            make_conn("firefox", 100, "ESTABLISHED"),
-            make_conn("curl", 200, "ESTABLISHED"),
+            make_conn_rated("firefox", 100, "ESTABLISHED", Some(300.0), Some(100.0)),
+            make_conn_rated("firefox", 100, "ESTABLISHED", Some(200.0), Some(50.0)),
+            make_conn_rated("firefox", 100, "ESTABLISHED", Some(100.0), Some(50.0)),
+            make_conn_rated("curl", 200, "ESTABLISHED", Some(250.0), Some(0.0)),
         ];
-        collector.update(&conns, &[make_interface(1000.0, 500.0)]);
-        assert_eq!(collector.ranked().len(), 2);
+        collector.update(&conns, &[make_interface(9999.0, 9999.0)]);
         let firefox = collector
             .ranked()
             .iter()
@@ -272,20 +325,44 @@ mod tests {
             .unwrap();
         assert_eq!(firefox.connection_count, 3);
         assert_eq!(curl.connection_count, 1);
-        assert!((firefox.rx_rate - 750.0).abs() < 0.01);
+        assert!((firefox.rx_rate - 600.0).abs() < 0.01);
+        assert!((firefox.tx_rate - 200.0).abs() < 0.01);
         assert!((curl.rx_rate - 250.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn processes_without_rates_show_zero_not_fake_equal_share() {
+        // Regression for the "all processes show identical RX" bug. When
+        // no per-connection rates are available (no packet capture path,
+        // Linux non-sudo, etc.) each process should report 0 rather than
+        // an equal slice of total interface bandwidth.
+        let mut collector = ProcessBandwidthCollector::new();
+        let conns = vec![
+            make_conn("firefox", 100, "ESTABLISHED"),
+            make_conn("curl", 200, "ESTABLISHED"),
+            make_conn("sshd", 300, "ESTABLISHED"),
+        ];
+        collector.update(&conns, &[make_interface(1000.0, 500.0)]);
+        for p in collector.ranked() {
+            assert_eq!(
+                p.rx_rate, 0.0,
+                "{} should have 0 rate when no per-connection data exists",
+                p.process_name
+            );
+            assert_eq!(p.tx_rate, 0.0, "{} should have 0 tx rate", p.process_name);
+            assert_eq!(p.rx_bytes, 0, "{} should have 0 bytes", p.process_name);
+        }
     }
 
     #[test]
     fn ranked_sorted_by_total_bandwidth_descending() {
         let mut collector = ProcessBandwidthCollector::new();
         let conns = vec![
-            make_conn("curl", 200, "ESTABLISHED"),
-            make_conn("firefox", 100, "ESTABLISHED"),
-            make_conn("firefox", 100, "ESTABLISHED"),
-            make_conn("firefox", 100, "ESTABLISHED"),
+            make_conn_rated("curl", 200, "ESTABLISHED", Some(100.0), Some(50.0)),
+            make_conn_rated("firefox", 100, "ESTABLISHED", Some(500.0), Some(200.0)),
+            make_conn_rated("firefox", 100, "ESTABLISHED", Some(300.0), Some(100.0)),
         ];
-        collector.update(&conns, &[make_interface(1000.0, 500.0)]);
+        collector.update(&conns, &[make_interface(9999.0, 9999.0)]);
         assert_eq!(collector.ranked()[0].process_name, "firefox");
         assert_eq!(collector.ranked()[1].process_name, "curl");
     }

@@ -86,13 +86,13 @@ fn run_traceroute(target: &str) -> Result<Vec<TracerouteHop>, String> {
     let output = Command::new("tracert")
         .args(["-d", "-w", "1000", "-h", "30", target])
         .output()
-        .map_err(|e| format!("Failed to run tracert: {}", e))?;
+        .map_err(|e| spawn_error("tracert", e))?;
 
     #[cfg(not(target_os = "windows"))]
     let output = Command::new("traceroute")
         .args(["-n", "-q", "3", "-w", "1", "-m", "30", target])
         .output()
-        .map_err(|e| format!("Failed to run traceroute: {}", e))?;
+        .map_err(|e| spawn_error("traceroute", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -103,6 +103,23 @@ fn run_traceroute(target: &str) -> Result<Vec<TracerouteHop>, String> {
 
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(parse_traceroute_output(&text))
+}
+
+/// Format a `Command::output()` failure with an install hint when the
+/// binary isn't on PATH. The generic `std::io::Error` Display for
+/// `NotFound` is `"No such file or directory"` which doesn't help users
+/// figure out what to install — substitute the package name explicitly.
+fn spawn_error(binary: &str, err: std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        let hint = match binary {
+            "traceroute" => "install with `sudo apt install traceroute` (Debian/Ubuntu), `sudo dnf install traceroute` (Fedora), or `brew install traceroute` (macOS)",
+            "tracert" => "tracert ships with Windows; PATH or %SystemRoot%\\System32 may be misconfigured",
+            _ => "binary not found on PATH",
+        };
+        format!("`{binary}` not installed — {hint}")
+    } else {
+        format!("Failed to run {binary}: {err}")
+    }
 }
 
 fn parse_traceroute_output(output: &str) -> Vec<TracerouteHop> {
