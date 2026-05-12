@@ -1,6 +1,6 @@
 [package]
 name = "netwatch-tui"
-version = "0.15.8"
+version = "0.15.9"
 edition = "2021"
 authors = ["Matt Hartley <matthew.t.hartley@gmail.com>"]
 description = "Real-time network diagnostics in your terminal. One command, zero config, instant visibility."
@@ -60,7 +60,7 @@ ring = "0.17"
 # returns `EbpfError::UnsupportedPlatform` and we fall back to lsof/ss
 # attribution. The Linux runtime path also gracefully falls back when
 # the BPF object is missing or CAP_BPF/CAP_PERFMON aren't granted.
-netwatch-sdk = { version = "0.1.1", features = ["ebpf"], optional = true }
+netwatch-sdk = { version = "0.1.2", features = ["ebpf"], optional = true }
 
 [features]
 # eBPF process attribution is on by default. The runtime gracefully

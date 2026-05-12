@@ -2,6 +2,12 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.15.9] - 2026-05-12
+
+### Changed
+- **`cargo install netwatch-tui` now ships eBPF too** — bumped the `netwatch-sdk` dep to 0.1.2, which carries a pre-built `netwatch_sdk_ebpf.o` (2424-byte eBPF ELF) directly in the published crate. The SDK's `build.rs` embeds it via `include_bytes!` automatically, so any Linux build picks it up without needing nightly Rust + bpf-linker + LLVM 18 on the consumer side. Closes the remaining gap from v0.15.8 where only `brew install` and direct tarball downloads got eBPF.
+- **Release workflow simplified** — dropped the now-redundant "Build netwatch-sdk eBPF object" + `[patch.crates-io]` step. The Linux release tarballs still get the same BPF object, but via the published SDK instead of an in-workflow clone-and-build.
+
 ## [0.15.8] - 2026-05-10
 
 ### Fixed

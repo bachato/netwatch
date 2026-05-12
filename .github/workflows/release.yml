@@ -128,34 +128,11 @@ jobs:
           Expand-Archive -Path npcap-sdk.zip -DestinationPath npcap-sdk
           echo "LIB=${{ github.workspace }}\npcap-sdk\Lib\x64" >> $env:GITHUB_ENV
 
-      # Build netwatch-sdk's BPF object so the SDK's `include_bytes!` resolves
-      # to a real artifact (otherwise EventSource::new returns BpfObjectMissing
-      # at runtime → netwatch falls back to lsof/ss attribution). Linux only;
-      # macOS keeps using PKTAP and Windows has no kernel attribution path yet.
-      #
-      # The patch.crates-io override only affects this job's working tree; the
-      # publish job has its own checkout of the tag (no patch) so cargo publish
-      # still resolves netwatch-sdk via crates.io.
-      #
-      # v0.15.6 attempted this and failed because the SDK's rust-toolchain.toml
-      # listed `bpfel-unknown-none` as a target — rustup tried to download
-      # rust-std for that tier-3 target which doesn't exist. SDK fix landed in
-      # netwatch-sdk@48f8960; this step only works against that commit or later.
-      - name: Install bpf-linker (Linux)
-        if: runner.os == 'Linux'
-        run: cargo install bpf-linker --locked
-
-      - name: Build netwatch-sdk eBPF object (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          git clone --depth=1 https://github.com/matthart1983/netwatch-sdk.git "${RUNNER_TEMP}/netwatch-sdk"
-          (cd "${RUNNER_TEMP}/netwatch-sdk" && bash scripts/build-ebpf.sh)
-          # Override the crates.io netwatch-sdk with the local copy that has
-          # `target/bpf/netwatch_sdk_ebpf.o` populated. Using printf rather
-          # than a heredoc because the workflow YAML's leading-space
-          # indentation breaks <<EOF terminator detection.
-          printf '\n[patch.crates-io]\nnetwatch-sdk = { path = "%s/netwatch-sdk" }\n' \
-            "$RUNNER_TEMP" >> Cargo.toml
+      # netwatch-sdk 0.1.2+ ships the pre-built BPF object on crates.io, so
+      # we no longer need to clone the SDK and run scripts/build-ebpf.sh
+      # here — `cargo build` resolves the SDK from crates.io and the build.rs
+      # picks up `pre-built/netwatch_sdk_ebpf.o` automatically. This also
+      # means `cargo install netwatch-tui` now gets working eBPF too.
 
       - name: Build
         shell: bash

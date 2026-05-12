@@ -727,9 +727,9 @@ dependencies = [
 
 [[package]]
 name = "netwatch-sdk"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8649a66c238eb66374395cff3243dbf00f2c278dd86dd5ec22be5ddc0693cd24"
+checksum = "4e3abbcf50abf045face61797d8c041847748702cf1baf85dff960b769c92c1b"
 dependencies = [
  "anyhow",
  "aya",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "netwatch-tui"
-version = "0.15.8"
+version = "0.15.9"
 dependencies = [
  "anyhow",
  "chrono",
