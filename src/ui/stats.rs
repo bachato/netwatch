@@ -72,7 +72,8 @@ fn compute_stats(app: &App, packets: &[CapturedPacket]) -> AggregateStats {
         .map(|i| i.tx_bytes_total)
         .sum();
 
-    let connection_count = app.connection_collector.connections.lock().unwrap().len();
+    let connection_count =
+        crate::app::safe_lock(&app.connection_collector.connections, "stats::render").len();
 
     // Retrans heuristic — packets where info contains retrans/retransmit/dup-ack
     let retrans_count = packets

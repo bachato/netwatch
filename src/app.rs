@@ -32,6 +32,23 @@ const RTT_SPARKLINE_SAMPLES: usize = 20;
 const MAX_RTT_HISTORY_IPS: usize = 256;
 const PAGE_SCROLL: usize = 10;
 
+/// Acquire a lock, recovering gracefully if it's poisoned by a panicked thread.
+/// Logs the poisoning event and continues with stale data rather than crashing.
+/// Use this instead of `lock().unwrap()` for any lock that might be held by a
+/// background collector thread (which could panic and poison the lock).
+pub(crate) fn safe_lock<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    context: &str,
+) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(target: "netwatch::lock", context = %context, "mutex poisoned by crashed thread; using stale data");
+            poisoned.into_inner()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineWindow {
     Min1,
@@ -854,7 +871,7 @@ impl App {
             .lock()
             .unwrap()
             .clone();
-        let health = self.health_prober.status.lock().unwrap();
+        let health = safe_lock(&self.health_prober.status, "app::sync_incident_recorder");
         let packets = self.packet_collector.get_packets();
         let dns = self.network_intel.dns_analytics();
         let alert_history: Vec<_> = self.network_intel.alert_history().iter().cloned().collect();
@@ -925,7 +942,10 @@ impl App {
         if self.conn_tick >= 2 {
             self.conn_tick = 0;
             self.connection_collector.update();
-            let conns = self.connection_collector.connections.lock().unwrap();
+            let conns = safe_lock(
+                &self.connection_collector.connections,
+                "app::tick::refresh_connections",
+            );
             self.connection_timeline.update(&conns);
             let interfaces = self.traffic.interfaces();
             self.process_bandwidth.update(&conns, &interfaces);
@@ -975,13 +995,12 @@ impl App {
         // Feed AI insights collector with a fresh network snapshot
         if let Some(ref collector) = self.insights_collector {
             let packets = self.packet_collector.get_packets();
-            let conns = self
-                .connection_collector
-                .connections
-                .lock()
-                .unwrap()
-                .clone();
-            let health = self.health_prober.status.lock().unwrap().clone();
+            let conns = safe_lock(
+                &self.connection_collector.connections,
+                "app::tick::feed_insights",
+            )
+            .clone();
+            let health = safe_lock(&self.health_prober.status, "app::tick::feed_insights").clone();
             let interfaces = self.traffic.interfaces();
             let (rx_bps, tx_bps) = interfaces.iter().fold((0.0f64, 0.0f64), |(rx, tx), i| {
                 (rx + i.rx_rate, tx + i.tx_rate)
@@ -1002,7 +1021,7 @@ impl App {
         let history = &mut self.rtt_history;
         let order = &mut self.rtt_history_order;
         let sampled = &mut self.rtt_sampled_streams;
-        let tracker = tracker_arc.lock().unwrap();
+        let tracker = safe_lock(&tracker_arc, "app::sample_rtt_from_streams");
         tracker.for_each_new_handshake_rtt(sampled, |remote_ip, rtt_ms| {
             record_rtt_sample(history, order, remote_ip, rtt_ms);
         });
@@ -1124,7 +1143,10 @@ pub async fn run<B: Backend>(
     app.traffic.update();
     app.connection_collector.update();
     {
-        let conns = app.connection_collector.connections.lock().unwrap();
+        let conns = safe_lock(
+            &app.connection_collector.connections,
+            "app::init::sync_timeline",
+        );
         app.connection_timeline.update(&conns);
     }
     let gateway = app.config_collector.config.gateway.clone();
@@ -1944,8 +1966,13 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('a') if app.current_tab == Tab::Insights => {
             if let Some(ref collector) = app.insights_collector {
                 let packets = app.packet_collector.get_packets();
-                let conns = app.connection_collector.connections.lock().unwrap().clone();
-                let health = app.health_prober.status.lock().unwrap().clone();
+                let conns = safe_lock(
+                    &app.connection_collector.connections,
+                    "app::handle_key::insights_a",
+                )
+                .clone();
+                let health =
+                    safe_lock(&app.health_prober.status, "app::handle_key::insights_a").clone();
                 let interfaces = app.traffic.interfaces();
                 let (rx_bps, tx_bps) = interfaces.iter().fold((0.0f64, 0.0f64), |(rx, tx), i| {
                     (rx + i.rx_rate, tx + i.tx_rate)
@@ -2154,7 +2181,11 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('e')
             if app.current_tab == Tab::Connections || app.current_tab == Tab::Processes =>
         {
-            let conns = app.connection_collector.connections.lock().unwrap().clone();
+            let conns = safe_lock(
+                &app.connection_collector.connections,
+                "app::handle_key::export_e",
+            )
+            .clone();
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             let json_path = format!("{home}/netwatch_connections_{ts}.json");
@@ -2293,7 +2324,7 @@ fn top_remote_ips(app: &App) -> Vec<(String, usize)> {
     // cursor index and the IP returned here can disagree whenever DNS
     // resolves a tied row to a name that orders differently from its IP.
     let mut acc: HashMap<String, (String, usize, bool)> = HashMap::new();
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = safe_lock(&app.connection_collector.connections, "app::top_remote_ips");
     for conn in conns.iter() {
         let (remote_ip, _) = parse_addr_parts(&conn.remote_addr);
         if let Some(ip) = remote_ip {

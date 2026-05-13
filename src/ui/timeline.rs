@@ -137,7 +137,7 @@ fn build_events(app: &App) -> Vec<Event> {
     // 5 main ticks (app.rs), so each history entry represents
     // 5 * refresh_rate_ms of wall time, not 1 second.
     {
-        let hs = app.health_prober.status.lock().unwrap();
+        let hs = crate::app::safe_lock(&app.health_prober.status, "timeline::render");
         let probe_interval_secs = (5 * app.user_config.refresh_rate_ms / 1000).max(1);
         for (label, history) in [
             ("gateway", hs.gateway_rtt_history.as_slices().0),

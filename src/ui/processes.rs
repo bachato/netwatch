@@ -384,7 +384,7 @@ fn render_top_remotes(f: &mut Frame, app: &App, area: Rect, proc: &ProcessBandwi
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = crate::app::safe_lock(&app.connection_collector.connections, "processes::render");
     let mut totals: HashMap<String, u32> = HashMap::new();
     for c in conns.iter() {
         let conn_name = c

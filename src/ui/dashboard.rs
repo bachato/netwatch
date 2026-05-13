@@ -48,7 +48,7 @@ fn render_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    let hs = app.health_prober.status.lock().unwrap();
+    let hs = crate::app::safe_lock(&app.health_prober.status, "dashboard::render");
     let gw_history = rtt_history_to_u64(hs.gateway_rtt_history.as_slices().0);
     let dns_history = rtt_history_to_u64(hs.dns_rtt_history.as_slices().0);
     let loss_history = rtt_history_to_loss(hs.gateway_rtt_history.as_slices().0);

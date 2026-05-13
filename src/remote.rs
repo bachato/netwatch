@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::app::safe_lock;
 use crate::collectors::connections::ConnectionCollector;
 use crate::collectors::health::HealthProber;
 use crate::collectors::traffic::InterfaceTraffic;
@@ -42,7 +43,7 @@ impl RemotePublisher {
                 thread::sleep(Duration::from_secs(15));
 
                 let snapshot = {
-                    let lock = data.lock().unwrap();
+                    let lock = safe_lock(&data, "remote::ingest_loop");
                     lock.clone()
                 };
 
@@ -97,7 +98,7 @@ impl RemotePublisher {
             .collect();
 
         let health_json = {
-            let status = health.status.lock().unwrap();
+            let status = safe_lock(&health.status, "remote::collect_snapshot::health");
             json!({
                 "gateway_rtt_ms": status.gateway_rtt_ms,
                 "gateway_loss_pct": status.gateway_loss_pct,
@@ -127,7 +128,7 @@ impl RemotePublisher {
             "tcp_close_wait": tcp_states.1,
         });
 
-        *self.snapshot_data.lock().unwrap() = Some(snapshot);
+        *safe_lock(&self.snapshot_data, "remote::collect_snapshot::store") = Some(snapshot);
     }
 }
 
@@ -382,7 +383,7 @@ fn collect_disk_usage() -> Vec<serde_json::Value> {
 }
 
 fn collect_tcp_states(connections: &ConnectionCollector) -> (u32, u32) {
-    let conns = connections.connections.lock().unwrap();
+    let conns = safe_lock(&connections.connections, "remote::collect_tcp_states");
     let mut time_wait = 0u32;
     let mut close_wait = 0u32;
     for conn in conns.iter() {

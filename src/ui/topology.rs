@@ -39,7 +39,7 @@ struct RemoteNode {
 
 fn build_remote_nodes(app: &App) -> (Vec<RemoteNode>, Vec<RemoteNode>) {
     let mut remotes: HashMap<String, (RemoteNode, bool)> = HashMap::new();
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = crate::app::safe_lock(&app.connection_collector.connections, "topology::render");
     for conn in conns.iter() {
         let ip = extract_ip(&conn.remote_addr);
         if ip.is_empty() || ip == "*" {
@@ -129,7 +129,7 @@ fn render_topology_graph(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let (local_nodes, public_nodes) = build_remote_nodes(app);
-    let hs = app.health_prober.status.lock().unwrap();
+    let hs = crate::app::safe_lock(&app.health_prober.status, "topology::render");
 
     // Layout: [SELF + LAN peers] ─ ROUTER ─ ISP ─ [public peers]
     let router_w = 16u16;
@@ -233,7 +233,8 @@ fn render_topology_graph(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // ISP box (derive from traceroute hop 2 if available)
-    let traceroute = app.traceroute_runner.result.lock().unwrap();
+    let traceroute =
+        crate::app::safe_lock(&app.traceroute_runner.result, "topology::render_isp_box");
     let isp_hop = traceroute.hops.iter().find(|h| h.hop_number == 2);
     let isp_ip = isp_hop
         .and_then(|h| h.ip.clone())
@@ -549,7 +550,8 @@ fn render_side_column(
 
 fn render_hop_detail(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let result = app.traceroute_runner.result.lock().unwrap();
+    let result =
+        crate::app::safe_lock(&app.traceroute_runner.result, "topology::render_hop_detail");
 
     let title_left = format!(" HOP DETAIL  self → {} ", result.target);
     let title_right = match result.status {

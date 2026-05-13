@@ -84,7 +84,7 @@ fn build_cards(app: &App) -> Vec<Card> {
 
     // Detector: gateway loss
     {
-        let hs = app.health_prober.status.lock().unwrap();
+        let hs = crate::app::safe_lock(&app.health_prober.status, "insights::render");
         let loss = hs.gateway_loss_pct;
         let rtt = hs.gateway_rtt_ms;
         if loss >= 50.0 {
@@ -149,7 +149,10 @@ fn build_cards(app: &App) -> Vec<Card> {
 
     // Detector: TIME_WAIT pile-up per process
     {
-        let conns = app.connection_collector.connections.lock().unwrap();
+        let conns = crate::app::safe_lock(
+            &app.connection_collector.connections,
+            "insights::render_summary",
+        );
         let mut pile_per_proc: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
         for c in conns.iter() {

@@ -140,7 +140,10 @@ fn count_states(conns: &[Connection]) -> StateCounts {
 
 fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = crate::app::safe_lock(
+        &app.connection_collector.connections,
+        "connections::render_chip_row",
+    );
     let counts = count_states(&conns);
     drop(conns);
 
@@ -191,7 +194,10 @@ fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = crate::app::safe_lock(
+        &app.connection_collector.connections,
+        "connections::render_header",
+    );
     let total = conns.len();
     let filter = active_connection_filter(app);
     let shown = if let Some(f) = filter.as_deref() {
@@ -266,7 +272,11 @@ fn matches_filter(conn: &crate::collectors::connections::Connection, filter: &st
 }
 
 pub(crate) fn filtered_sorted_conns(app: &App) -> Vec<Connection> {
-    let mut conns = app.connection_collector.connections.lock().unwrap().clone();
+    let mut conns = crate::app::safe_lock(
+        &app.connection_collector.connections,
+        "connections::filtered_sorted_conns",
+    )
+    .clone();
 
     // Chip-based state filter
     conns.retain(|c| app.connection_state_filter.matches(&c.state));
@@ -870,7 +880,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_traceroute_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let result = app.traceroute_runner.result.lock().unwrap();
+    let result = crate::app::safe_lock(
+        &app.traceroute_runner.result,
+        "connections::render_traceroute_overlay",
+    );
 
     let overlay_width = (area.width * 70 / 100)
         .max(50)
