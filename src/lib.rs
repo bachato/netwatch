@@ -8,6 +8,7 @@ pub mod logging;
 pub mod platform;
 pub mod remote;
 pub mod sort;
+pub mod state;
 pub mod theme;
 pub mod ui;
 

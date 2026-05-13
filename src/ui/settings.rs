@@ -174,8 +174,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     for (i, row) in rows.iter().enumerate() {
-        let is_selected = i == app.settings_cursor;
-        let is_editing = is_selected && app.settings_editing;
+        let is_selected = i == app.ui.settings_cursor;
+        let is_editing = is_selected && app.ui.settings_editing;
 
         let indicator = if is_selected { "▸ " } else { "  " };
         let label_style = if is_selected {
@@ -185,7 +185,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let value_display = if is_editing {
-            format!("{}▏", app.settings_edit_buf)
+            format!("{}▏", app.ui.settings_edit_buf)
         } else if is_selected
             && (i == cursor::THEME || i == cursor::DEFAULT_TAB || i == cursor::GRAPH_STYLE)
         {
@@ -216,7 +216,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     // Status message
     lines.push(Line::raw(""));
-    if let Some(ref status) = app.settings_status {
+    if let Some(ref status) = app.ui.settings_status {
         lines.push(Line::from(Span::styled(
             format!("  {}", status),
             Style::default().fg(app.theme.status_good),
@@ -233,16 +233,16 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Footer
-    let footer_spans = if app.settings_editing {
+    let footer_spans = if app.ui.settings_editing {
         vec![
             Span::styled("Enter", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(":Apply  "),
             Span::styled("Esc", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(":Cancel"),
         ]
-    } else if app.settings_cursor == cursor::THEME
-        || app.settings_cursor == cursor::DEFAULT_TAB
-        || app.settings_cursor == cursor::GRAPH_STYLE
+    } else if app.ui.settings_cursor == cursor::THEME
+        || app.ui.settings_cursor == cursor::DEFAULT_TAB
+        || app.ui.settings_cursor == cursor::GRAPH_STYLE
     {
         vec![
             Span::styled("←→", Style::default().fg(app.theme.key_hint).bold()),

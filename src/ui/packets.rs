@@ -21,7 +21,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let packets = app.packet_collector.get_packets();
     render_header(f, app, chunks[0], packets.len());
     render_packet_list(f, app, &packets, chunks[1]);
-    if app.stream_view_open {
+    if app.ui.stream_view_open {
         render_stream_view(f, app, chunks[2]);
     } else {
         render_detail(f, app, &packets, chunks[2]);
@@ -73,7 +73,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect, pkt_count: usize) {
                 .border_style(Style::default().fg(app.theme.border)),
         );
         f.render_widget(header, area);
-    } else if let Some(ref status) = app.export_status {
+    } else if let Some(ref status) = app.ui.export_status {
         let line1 = crate::ui::widgets::build_header_line(app, Some(extra));
         let lines = vec![
             line1,
@@ -121,10 +121,11 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
 
     // Apply display filter
     let filter_text = app
+        .ui
         .packet_filter_active
         .as_deref()
-        .or(if app.packet_filter_input {
-            Some(app.packet_filter_text.as_str())
+        .or(if app.ui.packet_filter_input {
+            Some(app.ui.packet_filter_text.as_str())
         } else {
             None
         });
@@ -140,10 +141,11 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
     let total_all = packets.len();
     let total = filtered.len();
 
-    let offset = if app.packet_follow && total > visible_height {
+    let offset = if app.ui.packet_follow && total > visible_height {
         total - visible_height
     } else {
-        app.scroll
+        app.ui
+            .scroll
             .packet_scroll
             .min(total.saturating_sub(visible_height))
     };
@@ -154,14 +156,14 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
         .take(visible_height)
         .map(|pkt| {
             let proto_style = protocol_color(&pkt.protocol, &app.theme);
-            let selected = app.scroll.packet_selected == Some(pkt.id);
+            let selected = app.ui.scroll.packet_selected == Some(pkt.id);
             let row_style = if selected {
                 Style::default().bg(app.theme.selection_bg)
             } else {
                 expert_row_style(pkt.expert, &app.theme)
             };
 
-            let is_bookmarked = app.bookmarks.contains(&pkt.id);
+            let is_bookmarked = app.caches.bookmarks.contains(&pkt.id);
             let (expert_icon, expert_style) = if is_bookmarked {
                 ("★", Style::default().fg(app.theme.status_warn).bold())
             } else {
@@ -240,7 +242,7 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
     )
     .header(header)
     .block({
-        let bm_count = app.bookmarks.len();
+        let bm_count = app.caches.bookmarks.len();
         let bm_label = if bm_count > 0 {
             format!(" ★{bm_count}")
         } else {
@@ -265,6 +267,7 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
 
 fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rect) {
     let selected_pkt = app
+        .ui
         .scroll
         .packet_selected
         .and_then(|id| packets.iter().find(|p| p.id == id));
@@ -292,7 +295,7 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
 
             // Geo info lines (if enabled)
             let mut geo_lines: Vec<Line> = Vec::new();
-            if app.show_geo {
+            if app.ui.show_geo {
                 for (label, ip) in [("Src", &pkt.src_ip), ("Dst", &pkt.dst_ip)] {
                     if let Some(geo) = app.geo_cache.lookup(ip) {
                         let loc = if geo.city.is_empty() {
@@ -492,7 +495,7 @@ fn render_hex_ascii(
 }
 
 fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
-    let stream_index = match app.stream_view_index {
+    let stream_index = match app.ui.stream_view_index {
         Some(idx) => idx,
         None => {
             let hint = Paragraph::new(" No stream selected")
@@ -548,12 +551,16 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // Header with direction filter indicators
-    let dir_label = match app.stream_direction_filter {
+    let dir_label = match app.ui.stream_direction_filter {
         StreamDirectionFilter::Both => "[a] Both",
         StreamDirectionFilter::AtoB => "[→] A→B",
         StreamDirectionFilter::BtoA => "[←] B→A",
     };
-    let mode_label = if app.stream_hex_mode { "Hex" } else { "Text" };
+    let mode_label = if app.ui.stream_hex_mode {
+        "Hex"
+    } else {
+        "Text"
+    };
     let mut header_spans = vec![
         Span::styled(
             format!(" {proto_str} Stream #{stream_index} "),
@@ -597,14 +604,14 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
     let filtered_segments: Vec<_> = stream
         .segments
         .iter()
-        .filter(|seg| match app.stream_direction_filter {
+        .filter(|seg| match app.ui.stream_direction_filter {
             StreamDirectionFilter::Both => true,
             StreamDirectionFilter::AtoB => seg.direction == StreamDirection::AtoB,
             StreamDirectionFilter::BtoA => seg.direction == StreamDirection::BtoA,
         })
         .collect();
 
-    let content_lines: Vec<Line> = if app.stream_hex_mode {
+    let content_lines: Vec<Line> = if app.ui.stream_hex_mode {
         // Hex mode: concatenated hex dump of all segment payloads
         let mut lines = Vec::new();
         for seg in &filtered_segments {
@@ -677,7 +684,7 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
     let visible_height = chunks[1].height.saturating_sub(2) as usize;
     let total_lines = content_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = app.scroll.stream_scroll.min(max_scroll);
+    let scroll = app.ui.scroll.stream_scroll.min(max_scroll);
 
     let visible_lines: Vec<Line> = content_lines
         .into_iter()
@@ -750,10 +757,10 @@ fn format_bytes(b: u64) -> String {
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     // Filter input mode — show editable filter bar
-    if app.packet_filter_input {
+    if app.ui.packet_filter_input {
         let filter_line = Line::from(vec![
             Span::styled(" / ", Style::default().fg(app.theme.brand).bold()),
-            Span::raw(&app.packet_filter_text),
+            Span::raw(&app.ui.packet_filter_text),
             Span::styled("█", Style::default().fg(app.theme.text_primary)),
         ]);
         let bar = Paragraph::new(filter_line).block(
@@ -765,7 +772,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let mut hints = if app.stream_view_open {
+    let mut hints = if app.ui.stream_view_open {
         vec![
             Span::styled("Esc", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(":Close  "),
@@ -792,7 +799,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         ]
     };
 
-    let follow_indicator = if app.packet_follow {
+    let follow_indicator = if app.ui.packet_follow {
         Span::styled(
             " [FOLLOW]",
             Style::default().fg(app.theme.status_good).bold(),
@@ -802,7 +809,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     hints.push(follow_indicator);
 
-    if let Some(ref ft) = app.packet_filter_active {
+    if let Some(ref ft) = app.ui.packet_filter_active {
         hints.push(Span::styled(
             " [FILTER: ",
             Style::default().fg(app.theme.key_hint).bold(),

@@ -15,12 +15,13 @@ use crate::config::NetwatchConfig;
 use crate::ebpf::EbpfStatus;
 use crate::event::{AppEvent, EventHandler};
 use crate::platform::{self, InterfaceInfo};
+use crate::state::{AppCaches, AppUiState};
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -44,6 +45,37 @@ pub(crate) fn safe_lock<'a, T>(
         Ok(guard) => guard,
         Err(poisoned) => {
             tracing::error!(target: "netwatch::lock", context = %context, "mutex poisoned by crashed thread; using stale data");
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Read-side counterpart to `safe_lock` for `RwLock`. Recovers from a poisoned
+/// lock by logging and yielding the stale-but-readable inner guard.
+pub(crate) fn safe_read<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    context: &str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(target: "netwatch::lock", context = %context, "rwlock poisoned by crashed thread; reading stale data");
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Write-side counterpart to `safe_lock` for `RwLock`. Recovers from a
+/// poisoned lock by logging and yielding the inner guard so we can overwrite
+/// whatever stale state was left behind by the panicked thread.
+pub(crate) fn safe_write<'a, T>(
+    lock: &'a std::sync::RwLock<T>,
+    context: &str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(target: "netwatch::lock", context = %context, "rwlock poisoned by crashed thread; overwriting with fresh data");
             poisoned.into_inner()
         }
     }
@@ -369,46 +401,14 @@ pub struct App {
     pub config_collector: ConfigCollector,
     pub health_prober: HealthProber,
     pub packet_collector: PacketCollector,
-    pub selected_interface: Option<usize>,
-    pub interface_filter: InterfaceFilter,
-    pub connection_state_filter: ConnectionStateFilter,
-    pub connection_group: ConnectionGroup,
-    pub stats_range: StatsRange,
-    pub timeline_filter: TimelineFilter,
     pub session_started_at: std::time::Instant,
-    pub paused: bool,
-    pub current_tab: Tab,
-    pub scroll: UiScrollState,
-    pub sort_states: HashMap<Tab, TabSortState>,
-    pub packet_follow: bool,
     pub capture_interface: String,
-    pub stream_view_open: bool,
-    pub stream_view_index: Option<u32>,
-    pub stream_direction_filter: StreamDirectionFilter,
-    pub stream_hex_mode: bool,
-    pub packet_filter_input: bool,
-    pub packet_filter_text: String,
-    pub packet_filter_active: Option<String>,
-    pub connection_filter_input: bool,
-    pub connection_filter_text: String,
-    pub connection_filter_active: Option<String>,
-    pub export_status: Option<String>,
-    export_status_tick: u32,
     pub bpf_filter_active: Option<String>,
     pub incident_recorder: IncidentRecorder,
-    pub show_help: bool,
-    /// Debug `M` overlay — current size of every bounded collection
-    /// vs its cap. Off by default; toggled with `M`. Documented in
-    /// help dialog but not advertised in the footer hotkey strip.
-    pub show_memory_stats: bool,
     pub geo_cache: GeoCache,
-    pub show_geo: bool,
     pub whois_cache: WhoisCache,
-    pub bookmarks: HashSet<u64>,
     pub traceroute_runner: TracerouteRunner,
-    pub traceroute_view_open: bool,
     pub connection_timeline: ConnectionTimeline,
-    pub timeline_window: TimelineWindow,
     pub network_intel: NetworkIntelCollector,
     intel_last_pkt_id: u64,
     pub ebpf_status: EbpfStatus,
@@ -434,38 +434,16 @@ pub struct App {
     conn_tick: u32,
     health_tick: u32,
     pub user_config: NetwatchConfig,
-    pub last_area: Rect,
-    /// Per-remote-IP RTT history for sparklines (keyed by remote IP string).
-    /// Bounded by MAX_RTT_HISTORY_IPS keys; oldest-inserted IP is evicted via
-    /// `rtt_history_order` when a new IP would push the map past the cap.
-    pub rtt_history: HashMap<String, VecDeque<f64>>,
-    /// FIFO of remote IPs in the order they first appeared in `rtt_history`.
-    /// Drives bounded eviction when the keyset exceeds MAX_RTT_HISTORY_IPS.
-    rtt_history_order: VecDeque<String>,
-    /// Rolling RX rate history per grouped (process, host) for the Dashboard
-    /// Top Connections sparkline. Updated each connection-collector tick.
-    pub top_conn_history: HashMap<(String, String), VecDeque<u64>>,
-    /// Rolling RX rate history per (process, pid) for the Process drill-in
-    /// chart. Updated each connection-collector tick.
-    pub top_proc_rx_history: HashMap<(String, Option<u32>), VecDeque<u64>>,
-    /// Recent interface up/down/IP-changed events surfaced on the Timeline tab.
-    /// Populated when info_tick detects a delta from the previous snapshot.
-    pub iface_events: VecDeque<IfaceChangeEvent>,
-    /// Snapshot of the previous interface_info, used to detect changes on the
-    /// next info_tick. Empty until the second info refresh.
-    prev_interface_info: Vec<InterfaceInfo>,
-    rtt_sampled_streams: HashSet<u32>,
+    /// Cross-cutting bounded caches (RTT/sparkline history, iface events,
+    /// bookmarks, etc.). See [`AppCaches`].
+    pub caches: AppCaches,
+    /// All UI-controlled state: tab, scroll, filters, modals, settings
+    /// cursor + status messages. See [`AppUiState`].
+    pub ui: AppUiState,
     pub theme: Theme,
     pub graph_style: crate::graph::GraphStyle,
     pub process_bandwidth: ProcessBandwidthCollector,
     pub insights_collector: Option<crate::collectors::insights::InsightsCollector>,
-    pub sort_picker: crate::ui::sort_picker::SortPickerState,
-    pub show_settings: bool,
-    pub settings_cursor: usize,
-    pub settings_editing: bool,
-    pub settings_edit_buf: String,
-    pub settings_status: Option<String>,
-    settings_status_tick: u32,
     incident_capture_started: bool,
     /// macOS PKTAP-based per-packet attribution. Spawned at startup; kept
     /// here so it stops cleanly when the App drops. None on non-macOS or
@@ -588,6 +566,8 @@ impl App {
             }
         }
 
+        let ui = AppUiState::from_config(&user_config);
+
         Self {
             traffic: TrafficCollector::new(),
             interface_info,
@@ -595,43 +575,14 @@ impl App {
             config_collector,
             health_prober: HealthProber::new(),
             packet_collector,
-            selected_interface: None,
-            interface_filter: InterfaceFilter::Active,
-            connection_state_filter: ConnectionStateFilter::All,
-            connection_group: ConnectionGroup::Process,
-            stats_range: StatsRange::Session,
-            timeline_filter: TimelineFilter::All,
             session_started_at: std::time::Instant::now(),
-            paused: false,
-            current_tab: user_config.tab(),
-            scroll: UiScrollState::default(),
-            sort_states: default_sort_states(),
-            packet_follow: user_config.packet_follow,
             capture_interface,
-            stream_view_open: false,
-            stream_view_index: None,
-            stream_direction_filter: StreamDirectionFilter::Both,
-            stream_hex_mode: false,
-            packet_filter_input: false,
-            packet_filter_text: String::new(),
-            packet_filter_active: None,
-            connection_filter_input: false,
-            connection_filter_text: String::new(),
-            connection_filter_active: None,
-            export_status: None,
-            export_status_tick: 0,
             bpf_filter_active,
             incident_recorder: IncidentRecorder::new(),
-            show_help: false,
-            show_memory_stats: false,
             geo_cache: GeoCache::with_mmdb(&user_config.geoip_db, &user_config.geoip_asn_db),
-            show_geo: user_config.show_geo,
             whois_cache: WhoisCache::new(),
-            bookmarks: HashSet::new(),
             traceroute_runner: TracerouteRunner::new(),
-            traceroute_view_open: false,
             connection_timeline: ConnectionTimeline::new(),
-            timeline_window: user_config.timeline_window_enum(),
             network_intel,
             intel_last_pkt_id: 0,
             ebpf_status: Self::init_ebpf_status(),
@@ -644,26 +595,13 @@ impl App {
             conn_tick: 0,
             health_tick: 0,
             user_config,
-            last_area: Rect::default(),
-            rtt_history: HashMap::new(),
-            rtt_history_order: VecDeque::new(),
-            top_conn_history: HashMap::new(),
-            top_proc_rx_history: HashMap::new(),
-            iface_events: VecDeque::new(),
-            prev_interface_info: Vec::new(),
-            rtt_sampled_streams: HashSet::new(),
+            caches: AppCaches::default(),
+            ui,
             theme,
             graph_style,
             process_bandwidth: ProcessBandwidthCollector::new(),
             insights_collector,
-            show_settings: false,
-            settings_cursor: 0,
-            settings_editing: false,
-            settings_edit_buf: String::new(),
-            settings_status: None,
-            settings_status_tick: 0,
             incident_capture_started: false,
-            sort_picker: Default::default(),
             #[cfg(target_os = "macos")]
             pktap_handle,
         }
@@ -717,12 +655,13 @@ impl App {
     }
 
     pub fn sort_column_index(&self, tab: Tab) -> Option<usize> {
-        self.sort_states.get(&tab).map(|s| s.column)
+        self.ui.sort_states.get(&tab).map(|s| s.column)
     }
 
     pub fn sort_indicator(&self, tab: Tab, col: usize) -> &str {
         if self.sort_column_index(tab) == Some(col) {
             let ascending = self
+                .ui
                 .sort_states
                 .get(&tab)
                 .map(|s| s.ascending)
@@ -800,11 +739,11 @@ impl App {
         }
 
         self.sync_incident_recorder();
-        self.export_status = Some(format!(
+        self.ui.export_status = Some(format!(
             "Flight recorder armed ({})",
             self.incident_recorder.window_label()
         ));
-        self.export_status_tick = 0;
+        self.ui.export_status_tick = 0;
     }
 
     fn disarm_incident_recorder(&mut self) {
@@ -813,8 +752,8 @@ impl App {
             self.packet_collector.stop_capture();
         }
         self.incident_capture_started = false;
-        self.export_status = Some("Flight recorder disarmed".to_string());
-        self.export_status_tick = 0;
+        self.ui.export_status = Some("Flight recorder disarmed".to_string());
+        self.ui.export_status_tick = 0;
     }
 
     fn freeze_incident_recorder(&mut self, reason: &str) {
@@ -828,19 +767,19 @@ impl App {
                     self.packet_collector.stop_capture();
                 }
                 self.incident_capture_started = false;
-                self.export_status = Some(format!("Incident frozen: {reason}"));
+                self.ui.export_status = Some(format!("Incident frozen: {reason}"));
             }
             Err(err) => {
-                self.export_status = Some(err);
+                self.ui.export_status = Some(err);
             }
         }
-        self.export_status_tick = 0;
+        self.ui.export_status_tick = 0;
     }
 
     fn export_incident_bundle(&mut self) {
         if self.incident_recorder.is_off() {
-            self.export_status = Some("Arm the flight recorder first with Shift+R".to_string());
-            self.export_status_tick = 0;
+            self.ui.export_status = Some("Arm the flight recorder first with Shift+R".to_string());
+            self.ui.export_status_tick = 0;
             return;
         }
 
@@ -851,13 +790,14 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         match self.incident_recorder.export_bundle(Path::new(&home)) {
             Ok(path) => {
-                self.export_status = Some(format!("Incident bundle saved to {}", path.display()));
+                self.ui.export_status =
+                    Some(format!("Incident bundle saved to {}", path.display()));
             }
             Err(err) => {
-                self.export_status = Some(format!("Incident export failed: {err}"));
+                self.ui.export_status = Some(format!("Incident export failed: {err}"));
             }
         }
-        self.export_status_tick = 0;
+        self.ui.export_status_tick = 0;
     }
 
     fn sync_incident_recorder(&mut self) {
@@ -865,13 +805,8 @@ impl App {
             return;
         }
 
-        let connections = self
-            .connection_collector
-            .connections
-            .lock()
-            .unwrap()
-            .clone();
-        let health = safe_lock(&self.health_prober.status, "app::sync_incident_recorder");
+        let connections = self.connection_collector.connections();
+        let health = self.health_prober.status();
         let packets = self.packet_collector.get_packets();
         let dns = self.network_intel.dns_analytics();
         let alert_history: Vec<_> = self.network_intel.alert_history().iter().cloned().collect();
@@ -902,23 +837,23 @@ impl App {
 
     fn tick(&mut self) {
         // Clear export status after 5 ticks
-        if self.export_status.is_some() {
-            self.export_status_tick += 1;
-            if self.export_status_tick >= 5 {
-                self.export_status = None;
-                self.export_status_tick = 0;
+        if self.ui.export_status.is_some() {
+            self.ui.export_status_tick += 1;
+            if self.ui.export_status_tick >= 5 {
+                self.ui.export_status = None;
+                self.ui.export_status_tick = 0;
             }
         }
 
-        if self.settings_status.is_some() {
-            self.settings_status_tick += 1;
-            if self.settings_status_tick >= 5 {
-                self.settings_status = None;
-                self.settings_status_tick = 0;
+        if self.ui.settings_status.is_some() {
+            self.ui.settings_status_tick += 1;
+            if self.ui.settings_status_tick >= 5 {
+                self.ui.settings_status = None;
+                self.ui.settings_status_tick = 0;
             }
         }
 
-        if self.paused {
+        if self.ui.paused {
             return;
         }
         self.traffic.update();
@@ -928,10 +863,14 @@ impl App {
         if self.info_tick >= 10 {
             self.info_tick = 0;
             if let Ok(info) = platform::collect_interface_info() {
-                if !self.prev_interface_info.is_empty() {
-                    diff_interfaces(&self.prev_interface_info, &info, &mut self.iface_events);
+                if !self.caches.prev_interface_info.is_empty() {
+                    diff_interfaces(
+                        &self.caches.prev_interface_info,
+                        &info,
+                        &mut self.caches.iface_events,
+                    );
                 }
-                self.prev_interface_info = info.clone();
+                self.caches.prev_interface_info = info.clone();
                 self.interface_info = info;
             }
             self.config_collector.update();
@@ -942,15 +881,12 @@ impl App {
         if self.conn_tick >= 2 {
             self.conn_tick = 0;
             self.connection_collector.update();
-            let conns = safe_lock(
-                &self.connection_collector.connections,
-                "app::tick::refresh_connections",
-            );
+            let conns = self.connection_collector.connections();
             self.connection_timeline.update(&conns);
             let interfaces = self.traffic.interfaces();
             self.process_bandwidth.update(&conns, &interfaces);
-            update_top_conn_history(&mut self.top_conn_history, &conns);
-            update_top_proc_rx_history(&mut self.top_proc_rx_history, &conns);
+            update_top_conn_history(&mut self.caches.top_conn_history, &conns);
+            update_top_proc_rx_history(&mut self.caches.top_proc_rx_history, &conns);
         }
 
         // The eBPF event source (when present) drains its own ring buffer
@@ -995,12 +931,8 @@ impl App {
         // Feed AI insights collector with a fresh network snapshot
         if let Some(ref collector) = self.insights_collector {
             let packets = self.packet_collector.get_packets();
-            let conns = safe_lock(
-                &self.connection_collector.connections,
-                "app::tick::feed_insights",
-            )
-            .clone();
-            let health = safe_lock(&self.health_prober.status, "app::tick::feed_insights").clone();
+            let conns = self.connection_collector.connections();
+            let health = self.health_prober.status();
             let interfaces = self.traffic.interfaces();
             let (rx_bps, tx_bps) = interfaces.iter().fold((0.0f64, 0.0f64), |(rx, tx), i| {
                 (rx + i.rx_rate, tx + i.tx_rate)
@@ -1018,9 +950,9 @@ impl App {
         // Hold each borrow on a local so the closure below doesn't conflict
         // with the &self that `packet_collector` belongs to.
         let tracker_arc = std::sync::Arc::clone(&self.packet_collector.stream_tracker);
-        let history = &mut self.rtt_history;
-        let order = &mut self.rtt_history_order;
-        let sampled = &mut self.rtt_sampled_streams;
+        let history = &mut self.caches.rtt_history;
+        let order = &mut self.caches.rtt_history_order;
+        let sampled = &mut self.caches.rtt_sampled_streams;
         let tracker = safe_lock(&tracker_arc, "app::sample_rtt_from_streams");
         tracker.for_each_new_handshake_rtt(sampled, |remote_ip, rtt_ms| {
             record_rtt_sample(history, order, remote_ip, rtt_ms);
@@ -1143,10 +1075,7 @@ pub async fn run<B: Backend>(
     app.traffic.update();
     app.connection_collector.update();
     {
-        let conns = safe_lock(
-            &app.connection_collector.connections,
-            "app::init::sync_timeline",
-        );
+        let conns = app.connection_collector.connections();
         app.connection_timeline.update(&conns);
     }
     let gateway = app.config_collector.config.gateway.clone();
@@ -1166,7 +1095,7 @@ pub async fn run<B: Backend>(
     loop {
         terminal.draw(|f| {
             let area = f.size();
-            app.last_area = area;
+            app.ui.last_area = area;
             // Paint the theme's panel background AND default foreground
             // first so themes that opt in (sky, paper) get a colored fill
             // *and* a sane default text color behind everything. Setting
@@ -1189,7 +1118,7 @@ pub async fn run<B: Backend>(
                     area,
                 );
             }
-            match app.current_tab {
+            match app.ui.current_tab {
                 Tab::Dashboard => ui::dashboard::render(f, &app, area),
                 Tab::Connections => ui::connections::render(f, &app, area),
                 Tab::Interfaces => ui::interfaces::render(f, &app, area),
@@ -1200,21 +1129,21 @@ pub async fn run<B: Backend>(
                 Tab::Processes => ui::processes::render(f, &app, area),
                 Tab::Insights => ui::insights::render(f, &app, area),
             }
-            if app.show_help {
+            if app.ui.show_help {
                 ui::help::render(f, &app, area);
             }
-            if app.show_settings {
+            if app.ui.show_settings {
                 ui::settings::render(f, &app, area);
             }
-            if app.show_memory_stats {
+            if app.ui.show_memory_stats {
                 ui::memory_stats::render(f, &app, area);
             }
-            if app.sort_picker.is_open() {
+            if app.ui.sort_picker.is_open() {
                 ui::sort_picker::render(
                     f,
-                    &app.sort_picker,
-                    sort_columns_for_tab(app.current_tab),
-                    app.sort_states.get(&app.current_tab),
+                    &app.ui.sort_picker,
+                    sort_columns_for_tab(app.ui.current_tab),
+                    app.ui.sort_states.get(&app.ui.current_tab),
                     &app.theme,
                     area,
                 );
@@ -1419,7 +1348,7 @@ fn diff_interfaces(
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
     let col = mouse.column;
     let row = mouse.row;
-    let area = app.last_area;
+    let area = app.ui.last_area;
 
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -1427,7 +1356,7 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
             if row < 3 {
                 if let Some(tab) = ui::widgets::tab_at_column(col, app.user_config.insights_enabled)
                 {
-                    app.current_tab = tab;
+                    app.ui.current_tab = tab;
                     return;
                 }
             }
@@ -1438,8 +1367,8 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
             let content_bottom = area.height.saturating_sub(3); // above footer
             if row >= content_top && row < content_bottom {
                 let clicked_row = (row - content_top) as usize;
-                match app.current_tab {
-                    Tab::Connections if !app.traceroute_view_open => {
+                match app.ui.current_tab {
+                    Tab::Connections if !app.ui.traceroute_view_open => {
                         // Map the screen click to a connection index. The
                         // Connections tab has a chip row + detail strip the
                         // generic content_top/content_bottom above doesn't
@@ -1467,37 +1396,38 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
                         }
                         let visible_rows = inner.height.saturating_sub(1) as usize;
                         let max_idx = conns.len().saturating_sub(1);
-                        let selected = app.scroll.connection_scroll.min(max_idx);
+                        let selected = app.ui.scroll.connection_scroll.min(max_idx);
                         let window_top = crate::ui::connections::compute_window_top(
                             selected,
                             conns.len(),
                             visible_rows,
                         );
                         let idx = (window_top + visible_row).min(max_idx);
-                        app.scroll.connection_scroll = idx;
+                        app.ui.scroll.connection_scroll = idx;
                     }
-                    Tab::Packets if !app.stream_view_open => {
+                    Tab::Packets if !app.ui.stream_view_open => {
                         if clicked_row > 0 {
                             let visible_row = clicked_row - 1;
                             let packets = app.packet_collector.get_packets();
-                            let scroll_base = if app.packet_follow {
+                            let scroll_base = if app.ui.packet_follow {
                                 let visible_height =
                                     (content_bottom - content_top).saturating_sub(1) as usize;
                                 packets.len().saturating_sub(visible_height)
                             } else {
-                                app.scroll.packet_scroll
+                                app.ui.scroll.packet_scroll
                             };
                             let idx = scroll_base + visible_row;
                             if let Some(pkt) = packets.get(idx) {
-                                app.packet_follow = false;
-                                app.scroll.packet_scroll = idx;
-                                app.scroll.packet_selected = Some(pkt.id);
+                                app.ui.packet_follow = false;
+                                app.ui.scroll.packet_scroll = idx;
+                                app.ui.scroll.packet_selected = Some(pkt.id);
                             }
                         }
                     }
-                    Tab::Topology if !app.traceroute_view_open => {
+                    Tab::Topology if !app.ui.traceroute_view_open => {
                         if clicked_row > 0 {
-                            app.scroll.topology_scroll = app
+                            app.ui.scroll.topology_scroll = app
+                                .ui
                                 .scroll
                                 .topology_scroll
                                 .saturating_sub(0)
@@ -1506,15 +1436,15 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
                     }
                     Tab::Timeline => {
                         if clicked_row > 0 {
-                            app.scroll.timeline_scroll = clicked_row - 1;
+                            app.ui.scroll.timeline_scroll = clicked_row - 1;
                         }
                     }
                     Tab::Processes => {
                         if clicked_row > 0 {
                             let visible_row = clicked_row - 1;
                             let max = app.process_bandwidth.ranked().len().saturating_sub(1);
-                            let idx = (app.scroll.process_scroll + visible_row).min(max);
-                            app.scroll.process_scroll = idx;
+                            let idx = (app.ui.scroll.process_scroll + visible_row).min(max);
+                            app.ui.scroll.process_scroll = idx;
                         }
                     }
                     _ => {}
@@ -1523,14 +1453,14 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
         }
         MouseEventKind::ScrollUp => {
             scroll_tab(app, -3);
-            if app.show_help {
-                app.scroll.help_scroll = clamp_scroll(app.scroll.help_scroll, -3, usize::MAX);
+            if app.ui.show_help {
+                app.ui.scroll.help_scroll = clamp_scroll(app.ui.scroll.help_scroll, -3, usize::MAX);
             }
         }
         MouseEventKind::ScrollDown => {
             scroll_tab(app, 3);
-            if app.show_help {
-                app.scroll.help_scroll += 3;
+            if app.ui.show_help {
+                app.ui.scroll.help_scroll += 3;
             }
         }
         _ => {}
@@ -1542,62 +1472,64 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
 /// Bounded scrolling (where a max is known) clamps at the last item;
 /// unbounded lists (Stats, Timeline, Insights) are left unclamped.
 fn scroll_tab(app: &mut App, delta: isize) {
-    match app.current_tab {
+    match app.ui.current_tab {
         Tab::Connections => {
-            if app.traceroute_view_open {
-                app.scroll.traceroute_scroll =
-                    clamp_scroll(app.scroll.traceroute_scroll, delta, usize::MAX);
+            if app.ui.traceroute_view_open {
+                app.ui.scroll.traceroute_scroll =
+                    clamp_scroll(app.ui.scroll.traceroute_scroll, delta, usize::MAX);
             } else {
                 // Clamp against the filtered list so PgDn/arrows can't
                 // land on rows the user isn't seeing (issue #26).
                 let max = crate::ui::connections::filtered_sorted_conns(app)
                     .len()
                     .saturating_sub(1);
-                app.scroll.connection_scroll =
-                    clamp_scroll(app.scroll.connection_scroll, delta, max);
+                app.ui.scroll.connection_scroll =
+                    clamp_scroll(app.ui.scroll.connection_scroll, delta, max);
             }
         }
         Tab::Packets => {
-            if app.stream_view_open {
-                app.scroll.stream_scroll =
-                    clamp_scroll(app.scroll.stream_scroll, delta, usize::MAX);
+            if app.ui.stream_view_open {
+                app.ui.scroll.stream_scroll =
+                    clamp_scroll(app.ui.scroll.stream_scroll, delta, usize::MAX);
             } else {
-                app.packet_follow = false;
+                app.ui.packet_follow = false;
                 let packets = app.packet_collector.get_packets();
                 let max = packets.len().saturating_sub(1);
-                app.scroll.packet_scroll = clamp_scroll(app.scroll.packet_scroll, delta, max);
-                if let Some(pkt) = packets.get(app.scroll.packet_scroll) {
-                    app.scroll.packet_selected = Some(pkt.id);
+                app.ui.scroll.packet_scroll = clamp_scroll(app.ui.scroll.packet_scroll, delta, max);
+                if let Some(pkt) = packets.get(app.ui.scroll.packet_scroll) {
+                    app.ui.scroll.packet_selected = Some(pkt.id);
                 }
             }
         }
         Tab::Stats => {
-            app.scroll.stats_scroll = clamp_scroll(app.scroll.stats_scroll, delta, usize::MAX);
+            app.ui.scroll.stats_scroll =
+                clamp_scroll(app.ui.scroll.stats_scroll, delta, usize::MAX);
         }
         Tab::Topology => {
-            if app.traceroute_view_open {
-                app.scroll.traceroute_scroll =
-                    clamp_scroll(app.scroll.traceroute_scroll, delta, usize::MAX);
+            if app.ui.traceroute_view_open {
+                app.ui.scroll.traceroute_scroll =
+                    clamp_scroll(app.ui.scroll.traceroute_scroll, delta, usize::MAX);
             } else {
                 let max = top_remote_ips(app).len().saturating_sub(1);
-                app.scroll.topology_scroll = clamp_scroll(app.scroll.topology_scroll, delta, max);
+                app.ui.scroll.topology_scroll =
+                    clamp_scroll(app.ui.scroll.topology_scroll, delta, max);
             }
         }
         Tab::Timeline => {
-            app.scroll.timeline_scroll =
-                clamp_scroll(app.scroll.timeline_scroll, delta, usize::MAX);
+            app.ui.scroll.timeline_scroll =
+                clamp_scroll(app.ui.scroll.timeline_scroll, delta, usize::MAX);
         }
         Tab::Processes => {
             let max = app.process_bandwidth.ranked().len().saturating_sub(1);
-            app.scroll.process_scroll = clamp_scroll(app.scroll.process_scroll, delta, max);
+            app.ui.scroll.process_scroll = clamp_scroll(app.ui.scroll.process_scroll, delta, max);
         }
         Tab::Insights => {
-            app.scroll.insights_scroll =
-                clamp_scroll(app.scroll.insights_scroll, delta, usize::MAX);
+            app.ui.scroll.insights_scroll =
+                clamp_scroll(app.ui.scroll.insights_scroll, delta, usize::MAX);
         }
         Tab::Interfaces => {
             let max = app.traffic.interface_count().saturating_sub(1);
-            app.selected_interface = match (app.selected_interface, delta < 0) {
+            app.ui.selected_interface = match (app.ui.selected_interface, delta < 0) {
                 (Some(0) | None, true) => None,
                 (None, false) => Some(0_usize.min(max)),
                 (Some(i), _) => Some(clamp_scroll(i, delta, max)),
@@ -1615,33 +1547,34 @@ fn scroll_tab(app: &mut App, delta: isize) {
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     // Overlays intercept first
-    if app.show_help {
+    if app.ui.show_help {
         return handle_help_key(app, key);
     }
-    if app.show_settings {
+    if app.ui.show_settings {
         return handle_settings_key(app, key);
     }
-    if app.show_memory_stats {
+    if app.ui.show_memory_stats {
         // Tiny dedicated handler — Esc / M close, q / Ctrl-C still quit.
         match key.code {
-            KeyCode::Esc | KeyCode::Char('M') => app.show_memory_stats = false,
+            KeyCode::Esc | KeyCode::Char('M') => app.ui.show_memory_stats = false,
             KeyCode::Char('q') => return true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
             _ => {}
         }
         return false;
     }
-    if app.sort_picker.is_open() {
+    if app.ui.sort_picker.is_open() {
         // auto-close if tab changed to a non-sortable tab (e.g. via mouse)
-        if sort_columns_for_tab(app.current_tab).is_empty() {
-            app.sort_picker.close();
+        if sort_columns_for_tab(app.ui.current_tab).is_empty() {
+            app.ui.sort_picker.close();
         } else {
-            let cols = sort_columns_for_tab(app.current_tab);
-            let action = app.sort_picker.handle_key(key, cols);
+            let cols = sort_columns_for_tab(app.ui.current_tab);
+            let action = app.ui.sort_picker.handle_key(key, cols);
             match action {
                 ui::sort_picker::PickerAction::Select(col_idx) => {
-                    let tab = app.current_tab;
-                    app.sort_states
+                    let tab = app.ui.current_tab;
+                    app.ui
+                        .sort_states
                         .entry(tab)
                         .and_modify(|s| s.column = col_idx)
                         .or_insert(TabSortState {
@@ -1650,8 +1583,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                         });
                 }
                 ui::sort_picker::PickerAction::ToggleDirection => {
-                    let tab = app.current_tab;
-                    if let Some(state) = app.sort_states.get_mut(&tab) {
+                    let tab = app.ui.current_tab;
+                    if let Some(state) = app.ui.sort_states.get_mut(&tab) {
                         state.ascending = !state.ascending;
                     }
                 }
@@ -1661,11 +1594,11 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         }
     }
     // Text input modes
-    if app.packet_filter_input && app.current_tab == Tab::Packets {
+    if app.ui.packet_filter_input && app.ui.current_tab == Tab::Packets {
         handle_filter_input(app, key);
         return false;
     }
-    if app.connection_filter_input && app.current_tab == Tab::Connections {
+    if app.ui.connection_filter_input && app.ui.current_tab == Tab::Connections {
         handle_connection_filter_input(app, key);
         return false;
     }
@@ -1675,14 +1608,14 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
 fn handle_help_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('?') | KeyCode::Esc => {
-            app.show_help = false;
-            app.scroll.help_scroll = 0;
+            app.ui.show_help = false;
+            app.ui.scroll.help_scroll = 0;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.scroll.help_scroll = app.scroll.help_scroll.saturating_sub(1);
+            app.ui.scroll.help_scroll = app.ui.scroll.help_scroll.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.scroll.help_scroll += 1;
+            app.ui.scroll.help_scroll += 1;
         }
         KeyCode::Char('q') => return true,
         _ => {}
@@ -1691,16 +1624,16 @@ fn handle_help_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
 }
 
 fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
-    if app.settings_editing {
+    if app.ui.settings_editing {
         match key.code {
             KeyCode::Enter => {
-                let value = app.settings_edit_buf.clone();
-                let cursor = app.settings_cursor;
+                let value = app.ui.settings_edit_buf.clone();
+                let cursor = app.ui.settings_cursor;
                 match ui::settings::apply_edit(&mut app.user_config, cursor, &value) {
                     Ok(()) => {
-                        app.show_geo = app.user_config.show_geo;
-                        app.packet_follow = app.user_config.packet_follow;
-                        app.timeline_window = app.user_config.timeline_window_enum();
+                        app.ui.show_geo = app.user_config.show_geo;
+                        app.ui.packet_follow = app.user_config.packet_follow;
+                        app.ui.timeline_window = app.user_config.timeline_window_enum();
                         app.theme = crate::theme::by_name(&app.user_config.theme);
                         app.graph_style = crate::graph::by_name(&app.user_config.graph_style);
                         if (ui::settings::cursor::AI_INSIGHTS..=ui::settings::cursor::AI_ENDPOINT)
@@ -1714,48 +1647,49 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                             } else {
                                 None
                             };
-                            if !app.user_config.insights_enabled && app.current_tab == Tab::Insights
+                            if !app.user_config.insights_enabled
+                                && app.ui.current_tab == Tab::Insights
                             {
-                                app.current_tab = Tab::Dashboard;
+                                app.ui.current_tab = Tab::Dashboard;
                             }
                         }
-                        app.settings_status = Some("✓ Applied".into());
-                        app.settings_status_tick = 0;
+                        app.ui.settings_status = Some("✓ Applied".into());
+                        app.ui.settings_status_tick = 0;
                     }
                     Err(msg) => {
-                        app.settings_status = Some(format!("✗ {}", msg));
-                        app.settings_status_tick = 0;
+                        app.ui.settings_status = Some(format!("✗ {}", msg));
+                        app.ui.settings_status_tick = 0;
                     }
                 }
-                app.settings_editing = false;
+                app.ui.settings_editing = false;
             }
             KeyCode::Esc => {
-                app.settings_editing = false;
+                app.ui.settings_editing = false;
             }
             KeyCode::Backspace => {
-                app.settings_edit_buf.pop();
+                app.ui.settings_edit_buf.pop();
             }
             KeyCode::Char(c) => {
-                app.settings_edit_buf.push(c);
+                app.ui.settings_edit_buf.push(c);
             }
             _ => {}
         }
     } else {
         match key.code {
             KeyCode::Esc => {
-                app.show_settings = false;
+                app.ui.show_settings = false;
             }
             KeyCode::Char('q') => return true,
             KeyCode::Up | KeyCode::Char('k') => {
-                app.settings_cursor = app.settings_cursor.saturating_sub(1);
+                app.ui.settings_cursor = app.ui.settings_cursor.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if app.settings_cursor + 1 < ui::settings::SETTINGS_COUNT {
-                    app.settings_cursor += 1;
+                if app.ui.settings_cursor + 1 < ui::settings::SETTINGS_COUNT {
+                    app.ui.settings_cursor += 1;
                 }
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
-                if app.settings_cursor == ui::settings::cursor::THEME =>
+                if app.ui.settings_cursor == ui::settings::cursor::THEME =>
             {
                 let names = crate::theme::THEME_NAMES;
                 let current = names
@@ -1770,11 +1704,11 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 };
                 app.user_config.theme = names[next].to_string();
                 app.theme = crate::theme::by_name(names[next]);
-                app.settings_status = Some(format!("Theme: {}", names[next]));
-                app.settings_status_tick = 0;
+                app.ui.settings_status = Some(format!("Theme: {}", names[next]));
+                app.ui.settings_status_tick = 0;
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
-                if app.settings_cursor == ui::settings::cursor::DEFAULT_TAB =>
+                if app.ui.settings_cursor == ui::settings::cursor::DEFAULT_TAB =>
             {
                 let names = ui::settings::TAB_NAMES;
                 let current = names
@@ -1788,11 +1722,11 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     (current + names.len() - 1) % names.len()
                 };
                 app.user_config.default_tab = names[next].to_string();
-                app.settings_status = Some(format!("Default tab: {}", names[next]));
-                app.settings_status_tick = 0;
+                app.ui.settings_status = Some(format!("Default tab: {}", names[next]));
+                app.ui.settings_status_tick = 0;
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
-                if app.settings_cursor == ui::settings::cursor::GRAPH_STYLE =>
+                if app.ui.settings_cursor == ui::settings::cursor::GRAPH_STYLE =>
             {
                 let names = crate::graph::GRAPH_STYLE_NAMES;
                 let current = names
@@ -1807,25 +1741,25 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 };
                 app.user_config.graph_style = names[next].to_string();
                 app.graph_style = crate::graph::by_name(names[next]);
-                app.settings_status = Some(format!("Graph style: {}", names[next]));
-                app.settings_status_tick = 0;
+                app.ui.settings_status = Some(format!("Graph style: {}", names[next]));
+                app.ui.settings_status_tick = 0;
             }
             KeyCode::Enter => {
-                app.settings_editing = true;
-                app.settings_edit_buf =
-                    ui::settings::get_edit_value(&app.user_config, app.settings_cursor);
+                app.ui.settings_editing = true;
+                app.ui.settings_edit_buf =
+                    ui::settings::get_edit_value(&app.user_config, app.ui.settings_cursor);
             }
             KeyCode::Char('S') => match app.user_config.save() {
                 Ok(()) => {
                     let path = NetwatchConfig::path()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
-                    app.settings_status = Some(format!("✓ Saved to {}", path));
-                    app.settings_status_tick = 0;
+                    app.ui.settings_status = Some(format!("✓ Saved to {}", path));
+                    app.ui.settings_status_tick = 0;
                 }
                 Err(e) => {
-                    app.settings_status = Some(format!("✗ Save failed: {}", e));
-                    app.settings_status_tick = 0;
+                    app.ui.settings_status = Some(format!("✗ Save failed: {}", e));
+                    app.ui.settings_status_tick = 0;
                 }
             },
             _ => {}
@@ -1837,22 +1771,22 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
 fn handle_filter_input(app: &mut App, key: crossterm::event::KeyEvent) {
     match key.code {
         KeyCode::Enter => {
-            app.packet_filter_input = false;
-            if app.packet_filter_text.trim().is_empty() {
-                app.packet_filter_active = None;
+            app.ui.packet_filter_input = false;
+            if app.ui.packet_filter_text.trim().is_empty() {
+                app.ui.packet_filter_active = None;
             } else {
-                app.packet_filter_active = Some(app.packet_filter_text.clone());
+                app.ui.packet_filter_active = Some(app.ui.packet_filter_text.clone());
             }
         }
         KeyCode::Esc => {
-            app.packet_filter_input = false;
-            app.packet_filter_text = app.packet_filter_active.clone().unwrap_or_default();
+            app.ui.packet_filter_input = false;
+            app.ui.packet_filter_text = app.ui.packet_filter_active.clone().unwrap_or_default();
         }
         KeyCode::Backspace => {
-            app.packet_filter_text.pop();
+            app.ui.packet_filter_text.pop();
         }
         KeyCode::Char(c) => {
-            app.packet_filter_text.push(c);
+            app.ui.packet_filter_text.push(c);
         }
         _ => {}
     }
@@ -1861,23 +1795,24 @@ fn handle_filter_input(app: &mut App, key: crossterm::event::KeyEvent) {
 fn handle_connection_filter_input(app: &mut App, key: crossterm::event::KeyEvent) {
     match key.code {
         KeyCode::Enter => {
-            app.connection_filter_input = false;
-            if app.connection_filter_text.trim().is_empty() {
-                app.connection_filter_active = None;
+            app.ui.connection_filter_input = false;
+            if app.ui.connection_filter_text.trim().is_empty() {
+                app.ui.connection_filter_active = None;
             } else {
-                app.connection_filter_active = Some(app.connection_filter_text.clone());
+                app.ui.connection_filter_active = Some(app.ui.connection_filter_text.clone());
             }
-            app.scroll.connection_scroll = 0;
+            app.ui.scroll.connection_scroll = 0;
         }
         KeyCode::Esc => {
-            app.connection_filter_input = false;
-            app.connection_filter_text = app.connection_filter_active.clone().unwrap_or_default();
+            app.ui.connection_filter_input = false;
+            app.ui.connection_filter_text =
+                app.ui.connection_filter_active.clone().unwrap_or_default();
         }
         KeyCode::Backspace => {
-            app.connection_filter_text.pop();
+            app.ui.connection_filter_text.pop();
         }
         KeyCode::Char(c) => {
-            app.connection_filter_text.push(c);
+            app.ui.connection_filter_text.push(c);
         }
         _ => {}
     }
@@ -1890,17 +1825,19 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('q') => return true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('?') => {
-            app.show_help = !app.show_help;
-            app.scroll.help_scroll = 0;
+            app.ui.show_help = !app.ui.show_help;
+            app.ui.scroll.help_scroll = 0;
         }
         KeyCode::Char('M') => {
             // Capital M — debug overlay for bounded-collection sizes.
             // Intentionally only the uppercase variant so it doesn't
             // collide with any future lowercase `m` binding.
-            app.show_memory_stats = !app.show_memory_stats;
+            app.ui.show_memory_stats = !app.ui.show_memory_stats;
         }
-        KeyCode::Char('g') => app.show_geo = !app.show_geo,
-        KeyCode::Char('t') if app.current_tab != Tab::Timeline && app.current_tab != Tab::Stats => {
+        KeyCode::Char('g') => app.ui.show_geo = !app.ui.show_geo,
+        KeyCode::Char('t')
+            if app.ui.current_tab != Tab::Timeline && app.ui.current_tab != Tab::Stats =>
+        {
             let names = crate::theme::THEME_NAMES;
             let current = names.iter().position(|&n| n == app.theme.name).unwrap_or(0);
             let next = (current + 1) % names.len();
@@ -1908,13 +1845,13 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.theme = crate::theme::by_name(names[next]);
         }
         KeyCode::Char(',') => {
-            app.show_settings = !app.show_settings;
-            app.settings_editing = false;
-            if app.show_settings && app.current_tab == Tab::Insights {
-                app.settings_cursor = ui::settings::cursor::AI_INSIGHTS;
+            app.ui.show_settings = !app.ui.show_settings;
+            app.ui.settings_editing = false;
+            if app.ui.show_settings && app.ui.current_tab == Tab::Insights {
+                app.ui.settings_cursor = ui::settings::cursor::AI_INSIGHTS;
             }
         }
-        KeyCode::Char('p') => app.paused = !app.paused,
+        KeyCode::Char('p') => app.ui.paused = !app.ui.paused,
         KeyCode::Char('r') => {
             app.traffic.update();
             if let Ok(info) = crate::platform::collect_interface_info() {
@@ -1943,36 +1880,31 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('E') => {
             app.export_incident_bundle();
         }
-        KeyCode::Char('1') => app.current_tab = Tab::Dashboard,
-        KeyCode::Char('2') => app.current_tab = Tab::Connections,
-        KeyCode::Char('3') => app.current_tab = Tab::Interfaces,
-        KeyCode::Char('4') => app.current_tab = Tab::Packets,
-        KeyCode::Char('5') => app.current_tab = Tab::Stats,
-        KeyCode::Char('6') => app.current_tab = Tab::Topology,
-        KeyCode::Char('7') => app.current_tab = Tab::Timeline,
-        KeyCode::Char('8') => app.current_tab = Tab::Processes,
+        KeyCode::Char('1') => app.ui.current_tab = Tab::Dashboard,
+        KeyCode::Char('2') => app.ui.current_tab = Tab::Connections,
+        KeyCode::Char('3') => app.ui.current_tab = Tab::Interfaces,
+        KeyCode::Char('4') => app.ui.current_tab = Tab::Packets,
+        KeyCode::Char('5') => app.ui.current_tab = Tab::Stats,
+        KeyCode::Char('6') => app.ui.current_tab = Tab::Topology,
+        KeyCode::Char('7') => app.ui.current_tab = Tab::Timeline,
+        KeyCode::Char('8') => app.ui.current_tab = Tab::Processes,
         KeyCode::Char('9') if app.user_config.insights_enabled => {
-            app.current_tab = Tab::Insights;
+            app.ui.current_tab = Tab::Insights;
         }
         // Stream view controls (intercept before other Packets keys)
-        KeyCode::Esc if app.current_tab == Tab::Packets && app.stream_view_open => {
-            app.stream_view_open = false;
-            app.stream_view_index = None;
-            app.scroll.stream_scroll = 0;
+        KeyCode::Esc if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
+            app.ui.stream_view_open = false;
+            app.ui.stream_view_index = None;
+            app.ui.scroll.stream_scroll = 0;
         }
-        KeyCode::Char('h') if app.current_tab == Tab::Packets && app.stream_view_open => {
-            app.stream_hex_mode = !app.stream_hex_mode;
+        KeyCode::Char('h') if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
+            app.ui.stream_hex_mode = !app.ui.stream_hex_mode;
         }
-        KeyCode::Char('a') if app.current_tab == Tab::Insights => {
+        KeyCode::Char('a') if app.ui.current_tab == Tab::Insights => {
             if let Some(ref collector) = app.insights_collector {
                 let packets = app.packet_collector.get_packets();
-                let conns = safe_lock(
-                    &app.connection_collector.connections,
-                    "app::handle_key::insights_a",
-                )
-                .clone();
-                let health =
-                    safe_lock(&app.health_prober.status, "app::handle_key::insights_a").clone();
+                let conns = app.connection_collector.connections();
+                let health = app.health_prober.status();
                 let interfaces = app.traffic.interfaces();
                 let (rx_bps, tx_bps) = interfaces.iter().fold((0.0f64, 0.0f64), |(rx, tx), i| {
                     (rx + i.rx_rate, tx + i.tx_rate)
@@ -1985,40 +1917,40 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 collector.submit_snapshot(snapshot);
             }
         }
-        KeyCode::Char('a') if app.current_tab == Tab::Packets && app.stream_view_open => {
-            app.stream_direction_filter = StreamDirectionFilter::Both;
+        KeyCode::Char('a') if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
+            app.ui.stream_direction_filter = StreamDirectionFilter::Both;
         }
-        KeyCode::Right if app.current_tab == Tab::Packets && app.stream_view_open => {
-            app.stream_direction_filter = StreamDirectionFilter::AtoB;
+        KeyCode::Right if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
+            app.ui.stream_direction_filter = StreamDirectionFilter::AtoB;
         }
-        KeyCode::Left if app.current_tab == Tab::Packets && app.stream_view_open => {
-            app.stream_direction_filter = StreamDirectionFilter::BtoA;
+        KeyCode::Left if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
+            app.ui.stream_direction_filter = StreamDirectionFilter::BtoA;
         }
         KeyCode::Up | KeyCode::Char('k')
-            if app.current_tab == Tab::Packets && app.stream_view_open =>
+            if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open =>
         {
-            app.scroll.stream_scroll = app.scroll.stream_scroll.saturating_sub(1);
+            app.ui.scroll.stream_scroll = app.ui.scroll.stream_scroll.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j')
-            if app.current_tab == Tab::Packets && app.stream_view_open =>
+            if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open =>
         {
-            app.scroll.stream_scroll += 1;
+            app.ui.scroll.stream_scroll += 1;
         }
-        KeyCode::Char('s') if app.current_tab == Tab::Packets && !app.stream_view_open => {
-            if let Some(sel_id) = app.scroll.packet_selected {
+        KeyCode::Char('s') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
+            if let Some(sel_id) = app.ui.scroll.packet_selected {
                 let packets = app.packet_collector.get_packets();
                 if let Some(pkt) = packets.iter().find(|p| p.id == sel_id) {
                     if pkt.stream_index.is_some() {
-                        app.stream_view_open = true;
-                        app.stream_view_index = pkt.stream_index;
-                        app.scroll.stream_scroll = 0;
-                        app.stream_direction_filter = StreamDirectionFilter::Both;
-                        app.stream_hex_mode = false;
+                        app.ui.stream_view_open = true;
+                        app.ui.stream_view_index = pkt.stream_index;
+                        app.ui.scroll.stream_scroll = 0;
+                        app.ui.stream_direction_filter = StreamDirectionFilter::Both;
+                        app.ui.stream_hex_mode = false;
                     }
                 }
             }
         }
-        KeyCode::Char('c') if app.current_tab == Tab::Packets => {
+        KeyCode::Char('c') if app.ui.current_tab == Tab::Packets => {
             if app.packet_collector.is_capturing() {
                 app.packet_collector.stop_capture();
             } else {
@@ -2027,84 +1959,84 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 app.packet_collector.start_capture(&iface, bpf);
             }
         }
-        KeyCode::Char('i') if app.current_tab == Tab::Packets => {
+        KeyCode::Char('i') if app.ui.current_tab == Tab::Packets => {
             if !app.packet_collector.is_capturing() {
                 app.cycle_capture_interface();
             }
         }
-        KeyCode::Char('x') if app.current_tab == Tab::Packets => {
+        KeyCode::Char('x') if app.ui.current_tab == Tab::Packets => {
             app.packet_collector.clear();
-            app.scroll.packet_scroll = 0;
-            app.scroll.packet_selected = None;
-            app.bookmarks.clear();
+            app.ui.scroll.packet_scroll = 0;
+            app.ui.scroll.packet_selected = None;
+            app.caches.bookmarks.clear();
         }
-        KeyCode::Char('m') if app.current_tab == Tab::Packets && !app.stream_view_open => {
-            if let Some(sel_id) = app.scroll.packet_selected {
-                if !app.bookmarks.remove(&sel_id) {
-                    app.bookmarks.insert(sel_id);
+        KeyCode::Char('m') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
+            if let Some(sel_id) = app.ui.scroll.packet_selected {
+                if !app.caches.bookmarks.remove(&sel_id) {
+                    app.caches.bookmarks.insert(sel_id);
                 }
             }
         }
-        KeyCode::Char('n') if app.current_tab == Tab::Packets && !app.stream_view_open => {
+        KeyCode::Char('n') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
             let packets = app.packet_collector.get_packets();
-            let current_id = app.scroll.packet_selected.unwrap_or(0);
+            let current_id = app.ui.scroll.packet_selected.unwrap_or(0);
             if let Some((idx, pkt)) = packets
                 .iter()
                 .enumerate()
-                .find(|(_, p)| p.id > current_id && app.bookmarks.contains(&p.id))
+                .find(|(_, p)| p.id > current_id && app.caches.bookmarks.contains(&p.id))
             {
-                app.scroll.packet_selected = Some(pkt.id);
-                app.scroll.packet_scroll = idx;
-                app.packet_follow = false;
+                app.ui.scroll.packet_selected = Some(pkt.id);
+                app.ui.scroll.packet_scroll = idx;
+                app.ui.packet_follow = false;
             }
         }
-        KeyCode::Char('N') if app.current_tab == Tab::Packets && !app.stream_view_open => {
+        KeyCode::Char('N') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
             let packets = app.packet_collector.get_packets();
-            let current_id = app.scroll.packet_selected.unwrap_or(u64::MAX);
+            let current_id = app.ui.scroll.packet_selected.unwrap_or(u64::MAX);
             if let Some((idx, pkt)) = packets
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, p)| p.id < current_id && app.bookmarks.contains(&p.id))
+                .find(|(_, p)| p.id < current_id && app.caches.bookmarks.contains(&p.id))
             {
-                app.scroll.packet_selected = Some(pkt.id);
-                app.scroll.packet_scroll = idx;
-                app.packet_follow = false;
+                app.ui.scroll.packet_selected = Some(pkt.id);
+                app.ui.scroll.packet_scroll = idx;
+                app.ui.packet_follow = false;
             }
         }
-        KeyCode::Char('f') if app.current_tab == Tab::Packets => {
-            app.packet_follow = !app.packet_follow;
+        KeyCode::Char('f') if app.ui.current_tab == Tab::Packets => {
+            app.ui.packet_follow = !app.ui.packet_follow;
         }
-        KeyCode::Char('f') if app.current_tab == Tab::Interfaces => {
-            app.interface_filter = app.interface_filter.cycle();
-            app.selected_interface = None;
+        KeyCode::Char('f') if app.ui.current_tab == Tab::Interfaces => {
+            app.ui.interface_filter = app.ui.interface_filter.cycle();
+            app.ui.selected_interface = None;
         }
         KeyCode::Char('f')
-            if app.current_tab == Tab::Connections
-                && !app.connection_filter_input
-                && !app.traceroute_view_open =>
+            if app.ui.current_tab == Tab::Connections
+                && !app.ui.connection_filter_input
+                && !app.ui.traceroute_view_open =>
         {
-            app.connection_state_filter = app.connection_state_filter.cycle();
-            app.scroll.connection_scroll = 0;
+            app.ui.connection_state_filter = app.ui.connection_state_filter.cycle();
+            app.ui.scroll.connection_scroll = 0;
         }
         KeyCode::Char('G')
-            if app.current_tab == Tab::Connections
-                && !app.connection_filter_input
-                && !app.traceroute_view_open =>
+            if app.ui.current_tab == Tab::Connections
+                && !app.ui.connection_filter_input
+                && !app.ui.traceroute_view_open =>
         {
-            app.connection_group = app.connection_group.cycle();
+            app.ui.connection_group = app.ui.connection_group.cycle();
         }
-        KeyCode::Char('t') if app.current_tab == Tab::Stats => {
-            app.stats_range = app.stats_range.cycle();
+        KeyCode::Char('t') if app.ui.current_tab == Tab::Stats => {
+            app.ui.stats_range = app.ui.stats_range.cycle();
         }
-        KeyCode::Char('f') if app.current_tab == Tab::Timeline => {
-            app.timeline_filter = app.timeline_filter.cycle();
+        KeyCode::Char('f') if app.ui.current_tab == Tab::Timeline => {
+            app.ui.timeline_filter = app.ui.timeline_filter.cycle();
         }
-        KeyCode::Char('w') if app.current_tab == Tab::Packets => {
+        KeyCode::Char('w') if app.ui.current_tab == Tab::Packets => {
             use crate::collectors::packets::{export_pcap, matches_packet, parse_filter};
             let packets = app.packet_collector.get_packets();
             let filtered: Vec<_>;
-            let to_export: &[_] = if let Some(ref ft) = app.packet_filter_active {
+            let to_export: &[_] = if let Some(ref ft) = app.ui.packet_filter_active {
                 if let Some(expr) = parse_filter(ft) {
                     filtered = packets
                         .iter()
@@ -2123,16 +2055,16 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             let path = format!("{home}/netwatch_capture_{ts}.pcap");
             match export_pcap(to_export, &path) {
                 Ok(n) => {
-                    app.export_status = Some(format!("Saved {n} packets to {path}"));
+                    app.ui.export_status = Some(format!("Saved {n} packets to {path}"));
                 }
                 Err(e) => {
-                    app.export_status = Some(format!("Export failed: {e}"));
+                    app.ui.export_status = Some(format!("Export failed: {e}"));
                 }
             }
-            app.export_status_tick = 0;
+            app.ui.export_status_tick = 0;
         }
-        KeyCode::Char('W') if app.current_tab == Tab::Packets && !app.stream_view_open => {
-            if let Some(sel_id) = app.scroll.packet_selected {
+        KeyCode::Char('W') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
+            if let Some(sel_id) = app.ui.scroll.packet_selected {
                 let packets = app.packet_collector.get_packets();
                 if let Some(pkt) = packets.iter().find(|p| p.id == sel_id) {
                     app.whois_cache.request(&pkt.src_ip);
@@ -2140,52 +2072,53 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Char('W') if app.current_tab == Tab::Connections => {
+        KeyCode::Char('W') if app.ui.current_tab == Tab::Connections => {
             // Operate on what the user sees, not the unfiltered list.
             let conns = crate::ui::connections::filtered_sorted_conns(app);
-            if let Some(conn) = conns.get(app.scroll.connection_scroll) {
+            if let Some(conn) = conns.get(app.ui.scroll.connection_scroll) {
                 let (remote_ip, _) = parse_addr_parts(&conn.remote_addr);
                 if let Some(ip) = remote_ip {
                     app.whois_cache.request(&ip);
                 }
             }
         }
-        KeyCode::Char('T') if app.current_tab == Tab::Connections && !app.traceroute_view_open => {
+        KeyCode::Char('T')
+            if app.ui.current_tab == Tab::Connections && !app.ui.traceroute_view_open =>
+        {
             let conns = crate::ui::connections::filtered_sorted_conns(app);
-            if let Some(conn) = conns.get(app.scroll.connection_scroll) {
+            if let Some(conn) = conns.get(app.ui.scroll.connection_scroll) {
                 let (remote_ip, _) = parse_addr_parts(&conn.remote_addr);
                 if let Some(ip) = remote_ip {
                     app.traceroute_runner.run(&ip);
-                    app.traceroute_view_open = true;
-                    app.scroll.traceroute_scroll = 0;
+                    app.ui.traceroute_view_open = true;
+                    app.ui.scroll.traceroute_scroll = 0;
                 }
             }
         }
-        KeyCode::Esc if app.current_tab == Tab::Connections && app.traceroute_view_open => {
-            app.traceroute_view_open = false;
+        KeyCode::Esc if app.ui.current_tab == Tab::Connections && app.ui.traceroute_view_open => {
+            app.ui.traceroute_view_open = false;
             app.traceroute_runner.clear();
         }
-        KeyCode::Char('/') if app.current_tab == Tab::Connections && !app.traceroute_view_open => {
-            app.connection_filter_input = true;
-            app.connection_filter_text = app.connection_filter_active.clone().unwrap_or_default();
+        KeyCode::Char('/')
+            if app.ui.current_tab == Tab::Connections && !app.ui.traceroute_view_open =>
+        {
+            app.ui.connection_filter_input = true;
+            app.ui.connection_filter_text =
+                app.ui.connection_filter_active.clone().unwrap_or_default();
         }
         KeyCode::Esc
-            if app.current_tab == Tab::Connections
-                && !app.traceroute_view_open
-                && app.connection_filter_active.is_some() =>
+            if app.ui.current_tab == Tab::Connections
+                && !app.ui.traceroute_view_open
+                && app.ui.connection_filter_active.is_some() =>
         {
-            app.connection_filter_active = None;
-            app.connection_filter_text.clear();
-            app.scroll.connection_scroll = 0;
+            app.ui.connection_filter_active = None;
+            app.ui.connection_filter_text.clear();
+            app.ui.scroll.connection_scroll = 0;
         }
         KeyCode::Char('e')
-            if app.current_tab == Tab::Connections || app.current_tab == Tab::Processes =>
+            if app.ui.current_tab == Tab::Connections || app.ui.current_tab == Tab::Processes =>
         {
-            let conns = safe_lock(
-                &app.connection_collector.connections,
-                "app::handle_key::export_e",
-            )
-            .clone();
+            let conns = app.connection_collector.connections();
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             let json_path = format!("{home}/netwatch_connections_{ts}.json");
@@ -2193,33 +2126,33 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             match crate::collectors::connections::export_json(&conns, &json_path) {
                 Ok(n) => {
                     let _ = crate::collectors::connections::export_csv(&conns, &csv_path);
-                    app.export_status = Some(format!("Exported {n} connections to JSON + CSV"));
+                    app.ui.export_status = Some(format!("Exported {n} connections to JSON + CSV"));
                 }
                 Err(e) => {
-                    app.export_status = Some(format!("Export failed: {e}"));
+                    app.ui.export_status = Some(format!("Export failed: {e}"));
                 }
             }
-            app.export_status_tick = 0;
+            app.ui.export_status_tick = 0;
         }
         KeyCode::Char('s') => {
-            let tab = app.current_tab;
+            let tab = app.ui.current_tab;
             let keys = sort_columns_for_tab(tab);
             if !keys.is_empty() {
-                let current_col = app.sort_states.get(&tab).map(|s| s.column).unwrap_or(0);
-                app.sort_picker.open(current_col, keys.len());
+                let current_col = app.ui.sort_states.get(&tab).map(|s| s.column).unwrap_or(0);
+                app.ui.sort_picker.open(current_col, keys.len());
             }
         }
         KeyCode::Char('S') => {
-            let tab = app.current_tab;
-            if let Some(state) = app.sort_states.get_mut(&tab) {
+            let tab = app.ui.current_tab;
+            if let Some(state) = app.ui.sort_states.get_mut(&tab) {
                 state.ascending = !state.ascending;
             }
         }
-        KeyCode::Char('t') if app.current_tab == Tab::Timeline => {
-            app.timeline_window = app.timeline_window.next();
+        KeyCode::Char('t') if app.ui.current_tab == Tab::Timeline => {
+            app.ui.timeline_window = app.ui.timeline_window.next();
         }
-        KeyCode::Enter if app.current_tab == Tab::Timeline => {
-            let window_secs = app.timeline_window.seconds();
+        KeyCode::Enter if app.ui.current_tab == Tab::Timeline => {
+            let window_secs = app.ui.timeline_window.seconds();
             let now = std::time::Instant::now();
             let window_start = now - std::time::Duration::from_secs(window_secs);
             let mut sorted: Vec<&crate::collectors::connections::TrackedConnection> = app
@@ -2233,65 +2166,66 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     .cmp(&a.is_active)
                     .then_with(|| a.first_seen.cmp(&b.first_seen))
             });
-            if let Some(tracked) = sorted.get(app.scroll.timeline_scroll) {
+            if let Some(tracked) = sorted.get(app.ui.scroll.timeline_scroll) {
                 let (remote_ip, _) = parse_addr_parts(&tracked.key.remote_addr);
                 if let Some(ip) = remote_ip {
-                    app.packet_filter_text = ip.clone();
-                    app.packet_filter_active = Some(ip);
-                    app.packet_filter_input = false;
-                    app.scroll.packet_scroll = 0;
-                    app.packet_follow = false;
-                    app.current_tab = Tab::Connections;
+                    app.ui.packet_filter_text = ip.clone();
+                    app.ui.packet_filter_active = Some(ip);
+                    app.ui.packet_filter_input = false;
+                    app.ui.scroll.packet_scroll = 0;
+                    app.ui.packet_follow = false;
+                    app.ui.current_tab = Tab::Connections;
                 }
             }
         }
-        KeyCode::Enter if app.current_tab == Tab::Connections => {
+        KeyCode::Enter if app.ui.current_tab == Tab::Connections => {
             let conns = crate::ui::connections::filtered_sorted_conns(app);
-            if let Some(conn) = conns.get(app.scroll.connection_scroll) {
+            if let Some(conn) = conns.get(app.ui.scroll.connection_scroll) {
                 let filter = build_connection_filter(conn);
-                app.packet_filter_text = filter.clone();
-                app.packet_filter_active = Some(filter);
-                app.packet_filter_input = false;
-                app.scroll.packet_scroll = 0;
-                app.packet_follow = false;
-                app.current_tab = Tab::Packets;
+                app.ui.packet_filter_text = filter.clone();
+                app.ui.packet_filter_active = Some(filter);
+                app.ui.packet_filter_input = false;
+                app.ui.scroll.packet_scroll = 0;
+                app.ui.packet_follow = false;
+                app.ui.current_tab = Tab::Packets;
             }
         }
-        KeyCode::Enter if app.current_tab == Tab::Topology && !app.traceroute_view_open => {
+        KeyCode::Enter if app.ui.current_tab == Tab::Topology && !app.ui.traceroute_view_open => {
             let remote_ips = top_remote_ips(app);
-            if let Some((ip, _)) = remote_ips.get(app.scroll.topology_scroll) {
-                app.packet_filter_text = ip.clone();
-                app.packet_filter_active = Some(ip.clone());
-                app.packet_filter_input = false;
-                app.scroll.packet_scroll = 0;
-                app.packet_follow = false;
-                app.current_tab = Tab::Connections;
+            if let Some((ip, _)) = remote_ips.get(app.ui.scroll.topology_scroll) {
+                app.ui.packet_filter_text = ip.clone();
+                app.ui.packet_filter_active = Some(ip.clone());
+                app.ui.packet_filter_input = false;
+                app.ui.scroll.packet_scroll = 0;
+                app.ui.packet_follow = false;
+                app.ui.current_tab = Tab::Connections;
             }
         }
-        KeyCode::Char('T') if app.current_tab == Tab::Topology => {
+        KeyCode::Char('T') if app.ui.current_tab == Tab::Topology => {
             let remote_ips = top_remote_ips(app);
-            if let Some((ip, _)) = remote_ips.get(app.scroll.topology_scroll) {
+            if let Some((ip, _)) = remote_ips.get(app.ui.scroll.topology_scroll) {
                 app.traceroute_runner.run(ip);
-                app.scroll.traceroute_scroll = 0;
+                app.ui.scroll.traceroute_scroll = 0;
             }
         }
-        KeyCode::Esc if app.current_tab == Tab::Topology => {
+        KeyCode::Esc if app.ui.current_tab == Tab::Topology => {
             app.traceroute_runner.clear();
         }
-        KeyCode::Enter if app.current_tab == Tab::Packets => {
+        KeyCode::Enter if app.ui.current_tab == Tab::Packets => {
             let packets = app.packet_collector.get_packets();
             if !packets.is_empty() {
                 let visible_height = 20usize;
                 let total = packets.len();
-                let offset = if app.packet_follow && total > visible_height {
+                let offset = if app.ui.packet_follow && total > visible_height {
                     total - visible_height
                 } else {
-                    app.scroll
+                    app.ui
+                        .scroll
                         .packet_scroll
                         .min(total.saturating_sub(visible_height))
                 };
                 if let Some(pkt) = packets.get(offset) {
-                    app.scroll.packet_selected = Some(pkt.id);
+                    app.ui.scroll.packet_selected = Some(pkt.id);
                 }
             }
         }
@@ -2299,17 +2233,17 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Down | KeyCode::Char('j') => scroll_tab(app, 1),
         KeyCode::PageUp => scroll_tab(app, -(PAGE_SCROLL as isize)),
         KeyCode::PageDown => scroll_tab(app, PAGE_SCROLL as isize),
-        KeyCode::Char('/') if app.current_tab == Tab::Packets && !app.stream_view_open => {
-            app.packet_filter_input = true;
-            app.packet_filter_text = app.packet_filter_active.clone().unwrap_or_default();
+        KeyCode::Char('/') if app.ui.current_tab == Tab::Packets && !app.ui.stream_view_open => {
+            app.ui.packet_filter_input = true;
+            app.ui.packet_filter_text = app.ui.packet_filter_active.clone().unwrap_or_default();
         }
         KeyCode::Esc
-            if app.current_tab == Tab::Packets
-                && !app.stream_view_open
-                && app.packet_filter_active.is_some() =>
+            if app.ui.current_tab == Tab::Packets
+                && !app.ui.stream_view_open
+                && app.ui.packet_filter_active.is_some() =>
         {
-            app.packet_filter_active = None;
-            app.packet_filter_text.clear();
+            app.ui.packet_filter_active = None;
+            app.ui.packet_filter_text.clear();
         }
         _ => {}
     }
@@ -2324,7 +2258,7 @@ fn top_remote_ips(app: &App) -> Vec<(String, usize)> {
     // cursor index and the IP returned here can disagree whenever DNS
     // resolves a tied row to a name that orders differently from its IP.
     let mut acc: HashMap<String, (String, usize, bool)> = HashMap::new();
-    let conns = safe_lock(&app.connection_collector.connections, "app::top_remote_ips");
+    let conns = app.connection_collector.connections();
     for conn in conns.iter() {
         let (remote_ip, _) = parse_addr_parts(&conn.remote_addr);
         if let Some(ip) = remote_ip {

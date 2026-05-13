@@ -75,7 +75,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     // the read path keeps the other 99% of callers cheap.
     let mut filtered: Vec<InterfaceTraffic> = (*app.traffic.interfaces()).clone();
     apply_filter(&mut filtered, app);
-    if let Some(state) = app.sort_states.get(&Tab::Interfaces) {
+    if let Some(state) = app.ui.sort_states.get(&Tab::Interfaces) {
         sort_interfaces(
             &mut filtered,
             Tab::Interfaces,
@@ -96,7 +96,7 @@ fn apply_filter(interfaces: &mut Vec<InterfaceTraffic>, app: &App) {
         let is_up = info.map(|inf| inf.is_up).unwrap_or(false);
         let has_traffic = crate::ui::widgets::interface_recently_active(i);
         let role = role_for(&i.name);
-        match app.interface_filter {
+        match app.ui.interface_filter {
             InterfaceFilter::Active => is_up && has_traffic,
             InterfaceFilter::All => true,
             InterfaceFilter::Wifi => role == "wifi" || role == "ethernet/wifi",
@@ -126,7 +126,7 @@ fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
             InterfaceFilter::Wifi | InterfaceFilter::Vpn => filter.label().to_string(),
             _ => format!("{} {}", filter.label(), count),
         };
-        let active = *filter == app.interface_filter;
+        let active = *filter == app.ui.interface_filter;
         if active {
             spans.push(Span::styled(
                 format!(" {} ", label),
@@ -273,7 +273,7 @@ fn render_interface_row(f: &mut Frame, app: &App, inner: Rect, i: usize, iface: 
     let main_color = if active { t.text_primary } else { t.text_muted };
 
     let row_y = inner.y + 1 + i as u16;
-    let selected = app.selected_interface == Some(i);
+    let selected = app.ui.selected_interface == Some(i);
 
     let row_area = Rect {
         x: inner.x + 1,
@@ -353,6 +353,7 @@ fn render_interface_row(f: &mut Frame, app: &App, inner: Rect, i: usize, iface: 
 fn render_detail_panel(f: &mut Frame, app: &App, interfaces: &[InterfaceTraffic], area: Rect) {
     let t = &app.theme;
     let selected = app
+        .ui
         .selected_interface
         .and_then(|i| interfaces.get(i))
         .or_else(|| interfaces.first());

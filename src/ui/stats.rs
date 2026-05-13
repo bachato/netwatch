@@ -72,8 +72,7 @@ fn compute_stats(app: &App, packets: &[CapturedPacket]) -> AggregateStats {
         .map(|i| i.tx_bytes_total)
         .sum();
 
-    let connection_count =
-        crate::app::safe_lock(&app.connection_collector.connections, "stats::render").len();
+    let connection_count = app.connection_collector.connections().len();
 
     // Retrans heuristic — packets where info contains retrans/retransmit/dup-ack
     let retrans_count = packets
@@ -112,7 +111,7 @@ fn render_range_chips(f: &mut Frame, app: &App, area: Rect) {
 
     let mut spans: Vec<Span> = vec![Span::styled(" range  ", Style::default().fg(t.text_muted))];
     for r in chips.iter() {
-        let active = *r == app.stats_range;
+        let active = *r == app.ui.stats_range;
         if active {
             spans.push(Span::styled(
                 format!(" {} ", r.label()),

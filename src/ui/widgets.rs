@@ -170,7 +170,7 @@ pub fn build_header_line(app: &App, extra: Option<Vec<Span<'static>>>) -> Line<'
         }
         let (num, name) = tab_label(tab);
         let label = format!("[{}] {}", num, name);
-        if tab == app.current_tab {
+        if tab == app.ui.current_tab {
             spans.push(Span::styled(
                 label,
                 Style::default().fg(t.active_tab).bold(),
@@ -180,7 +180,7 @@ pub fn build_header_line(app: &App, extra: Option<Vec<Span<'static>>>) -> Line<'
         }
     }
 
-    if app.paused {
+    if app.ui.paused {
         spans.push(Span::styled(
             " ⏸ PAUSED ",
             Style::default().fg(t.text_inverse).bg(t.status_warn),
@@ -211,8 +211,8 @@ pub fn build_header_line(app: &App, extra: Option<Vec<Span<'static>>>) -> Line<'
         RecorderState::Off => {}
     }
 
-    if app.current_tab != Tab::Packets {
-        if let Some(status) = &app.export_status {
+    if app.ui.current_tab != Tab::Packets {
+        if let Some(status) = &app.ui.export_status {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 truncate_inline(status, 56),

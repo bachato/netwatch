@@ -1,7 +1,8 @@
+use crate::app::{safe_read, safe_write};
 use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 const RTT_HISTORY_MAX: usize = 60;
@@ -17,7 +18,12 @@ pub struct HealthStatus {
 }
 
 pub struct HealthProber {
-    pub status: Arc<Mutex<HealthStatus>>,
+    /// Latest probe results, shared via the `Arc<RwLock<Arc<…>>>` snapshot
+    /// pattern (see [`crate::collectors::traffic::TrafficCollector`] for the
+    /// canonical example). Readers clone the inner `Arc` in O(1); the probe
+    /// thread builds a new `HealthStatus` and swaps it in via a brief write
+    /// lock so renders never block on an in-flight ping.
+    snapshot: Arc<RwLock<Arc<HealthStatus>>>,
     busy: Arc<AtomicBool>,
 }
 
@@ -30,16 +36,22 @@ impl Default for HealthProber {
 impl HealthProber {
     pub fn new() -> Self {
         Self {
-            status: Arc::new(Mutex::new(HealthStatus {
+            snapshot: Arc::new(RwLock::new(Arc::new(HealthStatus {
                 gateway_rtt_ms: None,
                 gateway_loss_pct: 100.0,
                 dns_rtt_ms: None,
                 dns_loss_pct: 100.0,
                 gateway_rtt_history: VecDeque::new(),
                 dns_rtt_history: VecDeque::new(),
-            })),
+            }))),
             busy: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Cheap snapshot of the most recent probe results. Single atomic
+    /// refcount bump regardless of history depth.
+    pub fn status(&self) -> Arc<HealthStatus> {
+        Arc::clone(&safe_read(&self.snapshot, "health::status"))
     }
 
     pub fn probe(&self, gateway: Option<&str>, dns_server: Option<&str>) {
@@ -48,31 +60,36 @@ impl HealthProber {
         }
         self.busy.store(true, Ordering::SeqCst);
         let busy = Arc::clone(&self.busy);
-        let status = Arc::clone(&self.status);
+        let snapshot = Arc::clone(&self.snapshot);
         let gw = gateway.map(|s| s.to_string());
         let dns = dns_server.map(|s| s.to_string());
         thread::spawn(move || {
+            // Each probe block builds a new HealthStatus off the latest
+            // published snapshot, then swaps it in. The deep-clone is cheap:
+            // `HealthStatus` contains at most ~60 history entries per series.
             if let Some(gw) = gw.as_deref() {
                 let (rtt, loss) = run_ping(gw);
-                let mut s = status.lock().unwrap();
-                s.gateway_rtt_ms = rtt;
-                s.gateway_loss_pct = loss;
-                s.gateway_rtt_history.push_back(rtt);
-                if s.gateway_rtt_history.len() > RTT_HISTORY_MAX {
-                    s.gateway_rtt_history.pop_front();
+                let mut next = (**safe_read(&snapshot, "health::probe::read_gw")).clone();
+                next.gateway_rtt_ms = rtt;
+                next.gateway_loss_pct = loss;
+                next.gateway_rtt_history.push_back(rtt);
+                if next.gateway_rtt_history.len() > RTT_HISTORY_MAX {
+                    next.gateway_rtt_history.pop_front();
                 }
-                s.gateway_rtt_history.make_contiguous();
+                next.gateway_rtt_history.make_contiguous();
+                *safe_write(&snapshot, "health::probe::publish_gw") = Arc::new(next);
             }
             if let Some(dns) = dns.as_deref() {
                 let (rtt, loss) = run_ping(dns);
-                let mut s = status.lock().unwrap();
-                s.dns_rtt_ms = rtt;
-                s.dns_loss_pct = loss;
-                s.dns_rtt_history.push_back(rtt);
-                if s.dns_rtt_history.len() > RTT_HISTORY_MAX {
-                    s.dns_rtt_history.pop_front();
+                let mut next = (**safe_read(&snapshot, "health::probe::read_dns")).clone();
+                next.dns_rtt_ms = rtt;
+                next.dns_loss_pct = loss;
+                next.dns_rtt_history.push_back(rtt);
+                if next.dns_rtt_history.len() > RTT_HISTORY_MAX {
+                    next.dns_rtt_history.pop_front();
                 }
-                s.dns_rtt_history.make_contiguous();
+                next.dns_rtt_history.make_contiguous();
+                *safe_write(&snapshot, "health::probe::publish_dns") = Arc::new(next);
             }
             busy.store(false, Ordering::SeqCst);
         });

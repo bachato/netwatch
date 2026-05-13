@@ -137,7 +137,7 @@ fn build_events(app: &App) -> Vec<Event> {
     // 5 main ticks (app.rs), so each history entry represents
     // 5 * refresh_rate_ms of wall time, not 1 second.
     {
-        let hs = crate::app::safe_lock(&app.health_prober.status, "timeline::render");
+        let hs = app.health_prober.status();
         let probe_interval_secs = (5 * app.user_config.refresh_rate_ms / 1000).max(1);
         for (label, history) in [
             ("gateway", hs.gateway_rtt_history.as_slices().0),
@@ -169,8 +169,8 @@ fn build_events(app: &App) -> Vec<Event> {
         }
     }
 
-    // Interface up/down/IP-changed events captured by app.iface_events
-    for iface_ev in app.iface_events.iter() {
+    // Interface up/down/IP-changed events captured by app.caches.iface_events
+    for iface_ev in app.caches.iface_events.iter() {
         let (kind_label, kind) = match iface_ev.kind {
             IfaceChangeKind::Up => ("up", Kind::Ok),
             IfaceChangeKind::Down => ("down", Kind::Warn),
@@ -266,7 +266,7 @@ fn render_chip_row(f: &mut Frame, app: &App, events: &[Event], area: Rect) {
     let mut spans: Vec<Span> = vec![Span::styled(" filter  ", Style::default().fg(t.text_muted))];
     for f in chips.iter() {
         let label = format!("{} {}", f.label(), count_for(*f));
-        let active = *f == app.timeline_filter;
+        let active = *f == app.ui.timeline_filter;
         if active {
             spans.push(Span::styled(
                 format!(" {} ", label),
@@ -468,7 +468,7 @@ fn render_events(f: &mut Frame, app: &App, events: &[Event], area: Rect) {
 
     let filtered: Vec<&Event> = events
         .iter()
-        .filter(|e| filter_matches(app.timeline_filter, e))
+        .filter(|e| filter_matches(app.ui.timeline_filter, e))
         .collect();
 
     let title_right = format!(" {} events  newest first ", filtered.len());
@@ -512,13 +512,14 @@ fn render_events(f: &mut Frame, app: &App, events: &[Event], area: Rect) {
 
     let max_rows = inner.height.saturating_sub(1) as usize;
     let scroll = app
+        .ui
         .scroll
         .timeline_scroll
         .min(filtered.len().saturating_sub(1));
     let now = Instant::now();
     for (i, ev) in filtered.iter().skip(scroll).take(max_rows).enumerate() {
         let row_y = inner.y + 1 + i as u16;
-        let is_selected = i + scroll == app.scroll.timeline_scroll;
+        let is_selected = i + scroll == app.ui.scroll.timeline_scroll;
         let age = format_age(now.duration_since(ev.when));
         let line = Line::from(vec![
             Span::styled(

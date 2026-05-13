@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::app::{safe_read, safe_write};
 use crate::collectors::connections::Connection;
 use crate::collectors::health::HealthStatus;
 use crate::collectors::packets::{CapturedPacket, ExpertSeverity};
@@ -230,8 +231,12 @@ impl NetworkSnapshot {
 }
 
 pub struct InsightsCollector {
-    pub insights: Arc<Mutex<Vec<Insight>>>,
-    pub status: Arc<Mutex<InsightsStatus>>,
+    /// Insights list, published via the `Arc<RwLock<Arc<…>>>` snapshot
+    /// pattern. The analysis thread builds a new `Vec` then swaps it in;
+    /// readers (UI) clone the inner `Arc` in O(1).
+    insights: Arc<RwLock<Arc<Vec<Insight>>>>,
+    /// Background analysis state, published with the same pattern.
+    status: Arc<RwLock<Arc<InsightsStatus>>>,
     snapshot_tx: std::sync::mpsc::Sender<NetworkSnapshot>,
     pub model: String,
     pub endpoint: String,
@@ -278,8 +283,9 @@ Rules:
 impl InsightsCollector {
     pub fn new(model: &str, endpoint: &str) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<NetworkSnapshot>();
-        let insights: Arc<Mutex<Vec<Insight>>> = Arc::new(Mutex::new(Vec::new()));
-        let status: Arc<Mutex<InsightsStatus>> = Arc::new(Mutex::new(InsightsStatus::Idle));
+        let insights: Arc<RwLock<Arc<Vec<Insight>>>> = Arc::new(RwLock::new(Arc::new(Vec::new())));
+        let status: Arc<RwLock<Arc<InsightsStatus>>> =
+            Arc::new(RwLock::new(Arc::new(InsightsStatus::Idle)));
 
         let insights_clone = Arc::clone(&insights);
         let status_clone = Arc::clone(&status);
@@ -306,22 +312,26 @@ impl InsightsCollector {
     }
 
     pub fn submit_snapshot(&self, snapshot: NetworkSnapshot) {
-        let _ = self.snapshot_tx.send(snapshot);
+        if let Err(e) = self.snapshot_tx.send(snapshot) {
+            tracing::error!(target: "netwatch::insights", error = %e, "analysis thread is gone; AI insights will not progress");
+        }
     }
 
-    pub fn get_insights(&self) -> Vec<Insight> {
-        self.insights.lock().unwrap().clone()
+    /// Cheap snapshot of the latest insights — single atomic refcount bump.
+    pub fn get_insights(&self) -> Arc<Vec<Insight>> {
+        Arc::clone(&safe_read(&self.insights, "insights::get_insights"))
     }
 
-    pub fn get_status(&self) -> InsightsStatus {
-        self.status.lock().unwrap().clone()
+    /// Cheap snapshot of the analysis status.
+    pub fn get_status(&self) -> Arc<InsightsStatus> {
+        Arc::clone(&safe_read(&self.status, "insights::get_status"))
     }
 }
 
 fn analysis_loop(
     rx: std::sync::mpsc::Receiver<NetworkSnapshot>,
-    insights: Arc<Mutex<Vec<Insight>>>,
-    status: Arc<Mutex<InsightsStatus>>,
+    insights: Arc<RwLock<Arc<Vec<Insight>>>>,
+    status: Arc<RwLock<Arc<InsightsStatus>>>,
     model: &str,
     endpoint: &str,
 ) {
@@ -357,29 +367,36 @@ fn analysis_loop(
             continue;
         }
 
-        *status.lock().unwrap() = InsightsStatus::Analyzing;
+        *safe_write(&status, "insights::analysis::start") = Arc::new(InsightsStatus::Analyzing);
 
         let prompt = snapshot.to_prompt();
         match call_ollama(model, endpoint, &prompt) {
             Ok(response) => {
                 let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                let mut ins = insights.lock().unwrap();
-                ins.push(Insight {
+                // Build the new insight list off the latest snapshot, then
+                // publish — keeps readers off our write path.
+                let mut next: Vec<Insight> =
+                    (**safe_read(&insights, "insights::analysis::read")).clone();
+                next.push(Insight {
                     timestamp,
                     text: clean_insight_text(&response),
                 });
                 // Keep last 20 insights
-                if ins.len() > 20 {
-                    ins.remove(0);
+                if next.len() > 20 {
+                    next.remove(0);
                 }
-                *status.lock().unwrap() = InsightsStatus::Available;
+                *safe_write(&insights, "insights::analysis::publish") = Arc::new(next);
+                *safe_write(&status, "insights::analysis::available") =
+                    Arc::new(InsightsStatus::Available);
             }
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("Connection refused") || msg.contains("connection refused") {
-                    *status.lock().unwrap() = InsightsStatus::OllamaUnavailable;
+                    *safe_write(&status, "insights::analysis::unavailable") =
+                        Arc::new(InsightsStatus::OllamaUnavailable);
                 } else {
-                    *status.lock().unwrap() = InsightsStatus::Error(msg);
+                    *safe_write(&status, "insights::analysis::error") =
+                        Arc::new(InsightsStatus::Error(msg));
                 }
             }
         }

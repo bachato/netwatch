@@ -108,7 +108,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     render_detail_strip(f, app, chunks[3]);
     render_footer(f, app, chunks[4]);
 
-    if app.traceroute_view_open {
+    if app.ui.traceroute_view_open {
         render_traceroute_overlay(f, app, area);
     }
 }
@@ -140,10 +140,7 @@ fn count_states(conns: &[Connection]) -> StateCounts {
 
 fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let conns = crate::app::safe_lock(
-        &app.connection_collector.connections,
-        "connections::render_chip_row",
-    );
+    let conns = app.connection_collector.connections();
     let counts = count_states(&conns);
     drop(conns);
 
@@ -157,7 +154,7 @@ fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = vec![Span::styled(" show  ", Style::default().fg(t.text_muted))];
     for (filter, count) in chips.iter() {
         let label = format!("{} {}", filter.label(), count);
-        let active = *filter == app.connection_state_filter;
+        let active = *filter == app.ui.connection_state_filter;
         if active {
             spans.push(Span::styled(
                 format!(" {} ", label),
@@ -178,7 +175,7 @@ fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
     // Right-aligned group toggle: " group: process / remote / none"
     let group_label = format!(
         "group: {}    f cycles  G groups",
-        app.connection_group.label(),
+        app.ui.connection_group.label(),
     );
     let used_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let total_w = area.width as usize;
@@ -194,10 +191,7 @@ fn render_chip_row(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
-    let conns = crate::app::safe_lock(
-        &app.connection_collector.connections,
-        "connections::render_header",
-    );
+    let conns = app.connection_collector.connections();
     let total = conns.len();
     let filter = active_connection_filter(app);
     let shown = if let Some(f) = filter.as_deref() {
@@ -254,11 +248,11 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn active_connection_filter(app: &App) -> Option<String> {
-    if let Some(ref f) = app.connection_filter_active {
+    if let Some(ref f) = app.ui.connection_filter_active {
         return Some(f.clone());
     }
-    if app.connection_filter_input && !app.connection_filter_text.is_empty() {
-        return Some(app.connection_filter_text.clone());
+    if app.ui.connection_filter_input && !app.ui.connection_filter_text.is_empty() {
+        return Some(app.ui.connection_filter_text.clone());
     }
     None
 }
@@ -272,14 +266,10 @@ fn matches_filter(conn: &crate::collectors::connections::Connection, filter: &st
 }
 
 pub(crate) fn filtered_sorted_conns(app: &App) -> Vec<Connection> {
-    let mut conns = crate::app::safe_lock(
-        &app.connection_collector.connections,
-        "connections::filtered_sorted_conns",
-    )
-    .clone();
+    let mut conns: Vec<Connection> = (*app.connection_collector.connections()).clone();
 
     // Chip-based state filter
-    conns.retain(|c| app.connection_state_filter.matches(&c.state));
+    conns.retain(|c| app.ui.connection_state_filter.matches(&c.state));
 
     // Free-text filter (slash mode)
     if let Some(ref f) = active_connection_filter(app) {
@@ -287,7 +277,7 @@ pub(crate) fn filtered_sorted_conns(app: &App) -> Vec<Connection> {
     }
 
     // Group/sort: process keeps process-grouped, remote groups by host, none sorts by RX desc
-    match app.connection_group {
+    match app.ui.connection_group {
         ConnectionGroup::Process => {
             conns.sort_by(|a, b| {
                 cmp_case_insensitive(
@@ -318,7 +308,7 @@ pub(crate) fn filtered_sorted_conns(app: &App) -> Vec<Connection> {
         }
         ConnectionGroup::None => {
             // Apply sort_states-driven sort or default RX desc
-            let sort_state = app.sort_states.get(&crate::app::Tab::Connections);
+            let sort_state = app.ui.sort_states.get(&crate::app::Tab::Connections);
             let col = sort_state.map(|s| s.column).unwrap_or(0);
             let asc = sort_state.map(|s| s.ascending).unwrap_or(true);
             sort(&mut conns, col, asc);
@@ -369,7 +359,7 @@ fn render_connection_table(f: &mut Frame, app: &App, area: Rect) {
     let title_right = format!(
         " {} shown  group: {} ",
         conns.len(),
-        app.connection_group.label()
+        app.ui.connection_group.label()
     );
     let block = Block::default()
         .title(Line::from(Span::styled(
@@ -392,7 +382,7 @@ fn render_connection_table(f: &mut Frame, app: &App, area: Rect) {
     // Column header. Mirrors the layout in `render_conn_row`. The GEO column
     // is only shown when the user has toggled `g`; it sits between REMOTE and
     // STATE so it qualifies the destination it describes.
-    let header_text: &str = if app.show_geo {
+    let header_text: &str = if app.ui.show_geo {
         "  PROCESS              PROTO  REMOTE                          GEO           STATE         RX/s         TX/s     RTT    AGE"
     } else {
         "  PROCESS              PROTO  REMOTE                          STATE         RX/s         TX/s     RTT    AGE"
@@ -413,7 +403,7 @@ fn render_connection_table(f: &mut Frame, app: &App, area: Rect) {
 
     let visible_rows = inner.height.saturating_sub(1) as usize;
     let max_idx = conns.len().saturating_sub(1);
-    let selected = app.scroll.connection_scroll.min(max_idx);
+    let selected = app.ui.scroll.connection_scroll.min(max_idx);
     let window_top = compute_window_top(selected, conns.len(), visible_rows);
 
     for (i, conn) in conns.iter().skip(window_top).take(visible_rows).enumerate() {
@@ -534,7 +524,7 @@ fn render_conn_row(
         ),
     ];
 
-    if app.show_geo {
+    if app.ui.show_geo {
         let host = host_only(&conn.remote_addr);
         let geo_str = format_geo_cell(app, &host);
         spans.push(Span::styled(
@@ -623,6 +613,7 @@ fn render_detail_strip(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let conns = filtered_sorted_conns(app);
     let selected_idx = app
+        .ui
         .scroll
         .connection_scroll
         .min(conns.len().saturating_sub(1));
@@ -788,7 +779,7 @@ fn render_detail_right(f: &mut Frame, app: &App, area: Rect, conn: &Connection) 
         return;
     }
 
-    // RX history: try app.top_conn_history keyed by (process, host) — same key the dashboard uses
+    // RX history: try app.caches.top_conn_history keyed by (process, host) — same key the dashboard uses
     let proc = conn.process_name.clone().unwrap_or_else(|| "—".into());
     let host = host_only(&conn.remote_addr);
     let key = (proc, host);
@@ -807,7 +798,7 @@ fn render_detail_right(f: &mut Frame, app: &App, area: Rect, conn: &Connection) 
         hdr_area,
     );
 
-    if let Some(hist) = app.top_conn_history.get(&key) {
+    if let Some(hist) = app.caches.top_conn_history.get(&key) {
         let data: Vec<u64> = hist.iter().copied().collect();
         if !data.is_empty() {
             let spark_area = Rect {
@@ -842,10 +833,10 @@ fn pad_hist(data: &[u64], target_width: usize) -> Vec<u64> {
 }
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
-    if app.connection_filter_input {
+    if app.ui.connection_filter_input {
         let filter_line = Line::from(vec![
             Span::styled(" / ", Style::default().fg(app.theme.brand).bold()),
-            Span::raw(&app.connection_filter_text),
+            Span::raw(&app.ui.connection_filter_text),
             Span::styled("█", Style::default().fg(app.theme.text_primary)),
         ]);
         let bar = Paragraph::new(filter_line).block(
@@ -857,7 +848,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let hints = if app.traceroute_view_open {
+    let hints = if app.ui.traceroute_view_open {
         vec![
             Span::styled("Esc", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(":Close  "),
@@ -963,7 +954,7 @@ fn render_traceroute_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let visible_height = inner.height as usize;
     let max_scroll = lines.len().saturating_sub(visible_height);
-    let scroll = app.scroll.traceroute_scroll.min(max_scroll);
+    let scroll = app.ui.scroll.traceroute_scroll.min(max_scroll);
     let visible_lines: Vec<Line> = lines
         .into_iter()
         .skip(scroll)

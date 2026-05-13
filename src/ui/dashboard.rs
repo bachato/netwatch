@@ -48,7 +48,7 @@ fn render_kpi_strip(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    let hs = crate::app::safe_lock(&app.health_prober.status, "dashboard::render");
+    let hs = app.health_prober.status();
     let gw_history = rtt_history_to_u64(hs.gateway_rtt_history.as_slices().0);
     let dns_history = rtt_history_to_u64(hs.dns_rtt_history.as_slices().0);
     let loss_history = rtt_history_to_loss(hs.gateway_rtt_history.as_slices().0);
@@ -609,7 +609,7 @@ fn render_top_connections(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(header), header_area);
 
     // Build grouped rows from connections
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = app.connection_collector.connections();
     let mut grouped: HashMap<(String, String), GroupedConn> = HashMap::new();
     for c in conns.iter() {
         // Skip listeners (no remote peer) and closed states; everything else
@@ -661,6 +661,7 @@ fn render_top_connections(f: &mut Frame, app: &App, area: Rect) {
     for (i, r) in rows.iter().take(max_rows).enumerate() {
         let key = (r.process.clone(), r.host.clone());
         let history_active = app
+            .caches
             .top_conn_history
             .get(&key)
             .map(|h| h.iter().any(|&v| v > 0))
@@ -726,7 +727,7 @@ fn render_top_connections(f: &mut Frame, app: &App, area: Rect) {
             let spark_w = (row_w - leading_w).min(14);
             if spark_w >= 4 {
                 let key = (r.process.clone(), r.host.clone());
-                if let Some(hist) = app.top_conn_history.get(&key) {
+                if let Some(hist) = app.caches.top_conn_history.get(&key) {
                     let data: Vec<u64> = hist.iter().copied().collect();
                     if !data.is_empty() {
                         let spark_area = Rect {
@@ -778,7 +779,7 @@ struct GroupedConn {
 
 fn render_health(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let hs = app.health_prober.status.lock().unwrap();
+    let hs = app.health_prober.status();
 
     let max_loss = hs.gateway_loss_pct.max(hs.dns_loss_pct);
     let title_right = if max_loss < 1.0 {

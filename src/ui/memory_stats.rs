@@ -50,7 +50,7 @@ fn gather(app: &App) -> Vec<Gauge> {
     // ── App-level RTT bookkeeping ──
     out.push(Gauge {
         name: "rtt history — IP keys",
-        current: app.rtt_history.len(),
+        current: app.caches.rtt_history.len(),
         cap: 256, // MAX_RTT_HISTORY_IPS — private const in app module
         note: "FIFO eviction on first-insert order",
     });

@@ -84,7 +84,7 @@ fn build_cards(app: &App) -> Vec<Card> {
 
     // Detector: gateway loss
     {
-        let hs = crate::app::safe_lock(&app.health_prober.status, "insights::render");
+        let hs = app.health_prober.status();
         let loss = hs.gateway_loss_pct;
         let rtt = hs.gateway_rtt_ms;
         if loss >= 50.0 {
@@ -149,10 +149,7 @@ fn build_cards(app: &App) -> Vec<Card> {
 
     // Detector: TIME_WAIT pile-up per process
     {
-        let conns = crate::app::safe_lock(
-            &app.connection_collector.connections,
-            "insights::render_summary",
-        );
+        let conns = app.connection_collector.connections();
         let mut pile_per_proc: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
         for c in conns.iter() {
@@ -295,16 +292,16 @@ fn render_summary(f: &mut Frame, app: &App, cards: &[Card], area: Rect) {
     // Right side: refresh status from LLM collector
     if let Some(collector) = app.insights_collector.as_ref() {
         let status = collector.get_status();
-        let status_color = match &status {
+        let status_color = match &*status {
             InsightsStatus::Available | InsightsStatus::Analyzing => t.status_good,
             InsightsStatus::Error(_) | InsightsStatus::OllamaUnavailable => t.text_muted,
             _ => t.text_muted,
         };
-        let status_text = match status {
+        let status_text = match &*status {
             InsightsStatus::Idle => "AI: idle".to_string(),
             InsightsStatus::Analyzing => format!("AI: analyzing ({})", collector.model),
             InsightsStatus::Available => format!("AI: {} ready", collector.model),
-            InsightsStatus::Error(e) => format!("AI error: {}", truncate(&e, 30)),
+            InsightsStatus::Error(e) => format!("AI error: {}", truncate(e, 30)),
             InsightsStatus::OllamaUnavailable => "AI: ollama unavailable".to_string(),
         };
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -336,6 +333,7 @@ fn render_cards(f: &mut Frame, app: &App, cards: &[Card], area: Rect) {
     let card_h = 6u16;
     let visible = (area.height / card_h) as usize;
     let scroll = app
+        .ui
         .scroll
         .insights_scroll
         .min(cards.len().saturating_sub(visible.max(1)));
@@ -507,7 +505,7 @@ fn render_empty_state(f: &mut Frame, app: &App, area: Rect) {
         )));
     } else {
         let status = app.insights_collector.as_ref().unwrap().get_status();
-        if matches!(status, InsightsStatus::OllamaUnavailable) {
+        if matches!(&*status, InsightsStatus::OllamaUnavailable) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "  AI: Ollama not running — `ollama serve` to enable AI cards.",

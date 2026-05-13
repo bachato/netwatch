@@ -28,7 +28,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     // Reserve 1 line for the footer hint
     let visible_height = inner.height.saturating_sub(1) as usize;
     let max_scroll = lines.len().saturating_sub(visible_height);
-    let offset = app.scroll.help_scroll.min(max_scroll);
+    let offset = app.ui.scroll.help_scroll.min(max_scroll);
 
     let visible: Vec<Line> = lines
         .into_iter()

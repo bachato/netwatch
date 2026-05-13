@@ -66,7 +66,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     render_sort_chips(f, app, chunks[1]);
 
     let mut ranked = app.process_bandwidth.ranked().to_vec();
-    if let Some(state) = app.sort_states.get(&crate::app::Tab::Processes) {
+    if let Some(state) = app.ui.sort_states.get(&crate::app::Tab::Processes) {
         sort(&mut ranked, state.column, state.ascending);
     }
 
@@ -80,6 +80,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 fn render_sort_chips(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let sort_state = app
+        .ui
         .sort_states
         .get(&crate::app::Tab::Processes)
         .copied()
@@ -189,7 +190,7 @@ fn render_process_table(f: &mut Frame, app: &App, ranked: &[ProcessBandwidth], a
 
     let visible = inner.height.saturating_sub(1) as usize;
     let max_idx = ranked.len().saturating_sub(1);
-    let selected = app.scroll.process_scroll.min(max_idx);
+    let selected = app.ui.scroll.process_scroll.min(max_idx);
     let window_top = if selected < visible {
         0
     } else {
@@ -310,7 +311,7 @@ fn render_process_row(
 fn render_drill_in(f: &mut Frame, app: &App, ranked: &[ProcessBandwidth], area: Rect) {
     let t = &app.theme;
     let max_idx = ranked.len().saturating_sub(1);
-    let selected_idx = app.scroll.process_scroll.min(max_idx);
+    let selected_idx = app.ui.scroll.process_scroll.min(max_idx);
     let selected = ranked.get(selected_idx);
 
     let title_left = match selected {
@@ -384,7 +385,7 @@ fn render_top_remotes(f: &mut Frame, app: &App, area: Rect, proc: &ProcessBandwi
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let conns = crate::app::safe_lock(&app.connection_collector.connections, "processes::render");
+    let conns = app.connection_collector.connections();
     let mut totals: HashMap<String, u32> = HashMap::new();
     for c in conns.iter() {
         let conn_name = c
@@ -465,7 +466,7 @@ fn render_socket_states(f: &mut Frame, app: &App, area: Rect, proc: &ProcessBand
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let conns = app.connection_collector.connections.lock().unwrap();
+    let conns = app.connection_collector.connections();
     let mut counts: HashMap<&'static str, u32> = HashMap::new();
     for c in conns.iter() {
         let conn_name = c
@@ -530,7 +531,7 @@ fn render_rx_chart(f: &mut Frame, app: &App, area: Rect, proc: &ProcessBandwidth
     }
 
     let key = (proc.process_name.clone(), proc.pid);
-    let buf = app.top_proc_rx_history.get(&key);
+    let buf = app.caches.top_proc_rx_history.get(&key);
     let data: Vec<u64> = buf.map(|b| b.iter().copied().collect()).unwrap_or_default();
 
     f.render_widget(

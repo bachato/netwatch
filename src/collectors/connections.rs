@@ -1,3 +1,4 @@
+use crate::app::{safe_read, safe_write};
 use crate::collectors::packets::{StreamKey, StreamProtocol, StreamTracker};
 #[cfg(target_os = "macos")]
 use crate::platform::pktap::PktapAttributor;
@@ -5,7 +6,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -156,7 +157,11 @@ impl RateState {
 }
 
 pub struct ConnectionCollector {
-    pub connections: Arc<Mutex<Vec<Connection>>>,
+    /// Latest connection list, published via the `Arc<RwLock<Arc<…>>>`
+    /// snapshot pattern. Readers clone the inner `Arc` in O(1) instead of
+    /// contending with the background `update()` thread on an exclusive lock
+    /// across an arbitrarily large `Vec<Connection>`.
+    snapshot: Arc<RwLock<Arc<Vec<Connection>>>>,
     busy: Arc<AtomicBool>,
     stream_tracker: Arc<Mutex<StreamTracker>>,
     rate_state: Arc<Mutex<RateState>>,
@@ -169,7 +174,7 @@ pub struct ConnectionCollector {
 impl ConnectionCollector {
     pub fn new(stream_tracker: Arc<Mutex<StreamTracker>>) -> Self {
         Self {
-            connections: Arc::new(Mutex::new(Vec::new())),
+            snapshot: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             busy: Arc::new(AtomicBool::new(false)),
             stream_tracker,
             rate_state: Arc::new(Mutex::new(RateState::new())),
@@ -178,6 +183,13 @@ impl ConnectionCollector {
             #[cfg(feature = "ebpf")]
             ebpf: None,
         }
+    }
+
+    /// Cheap snapshot of the most recent connection list. Single atomic
+    /// refcount bump regardless of connection count — the returned `Arc`
+    /// derefs to `&Vec<Connection>` so call sites work with it like a slice.
+    pub fn connections(&self) -> Arc<Vec<Connection>> {
+        Arc::clone(&safe_read(&self.snapshot, "connections::snapshot"))
     }
 
     /// Attach a PKTAP attribution cache. When set, `update()` will overlay
@@ -204,7 +216,7 @@ impl ConnectionCollector {
             return;
         }
         self.busy.store(true, Ordering::SeqCst);
-        let connections = Arc::clone(&self.connections);
+        let snapshot = Arc::clone(&self.snapshot);
         let busy = Arc::clone(&self.busy);
         let stream_tracker = Arc::clone(&self.stream_tracker);
         let rate_state = Arc::clone(&self.rate_state);
@@ -222,9 +234,9 @@ impl ConnectionCollector {
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             let mut result: Vec<Connection> = Vec::new();
 
-            let snapshot = stream_tracker.lock().unwrap().snapshot_bytes();
+            let stream_bytes = stream_tracker.lock().unwrap().snapshot_bytes();
             let mut state = rate_state.lock().unwrap();
-            state.tick(snapshot, Instant::now());
+            state.tick(stream_bytes, Instant::now());
             for conn in &mut result {
                 if let Some((key, side)) = connection_stream_key(conn) {
                     if let Some((rx, tx)) = state.rate_for(&key, side) {
@@ -245,7 +257,7 @@ impl ConnectionCollector {
                 overlay_ebpf_attribution(&mut result, ebpf);
             }
 
-            *connections.lock().unwrap() = result;
+            *safe_write(&snapshot, "connections::publish") = Arc::new(result);
             busy.store(false, Ordering::SeqCst);
         });
     }

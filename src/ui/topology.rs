@@ -39,7 +39,7 @@ struct RemoteNode {
 
 fn build_remote_nodes(app: &App) -> (Vec<RemoteNode>, Vec<RemoteNode>) {
     let mut remotes: HashMap<String, (RemoteNode, bool)> = HashMap::new();
-    let conns = crate::app::safe_lock(&app.connection_collector.connections, "topology::render");
+    let conns = app.connection_collector.connections();
     for conn in conns.iter() {
         let ip = extract_ip(&conn.remote_addr);
         if ip.is_empty() || ip == "*" {
@@ -129,7 +129,7 @@ fn render_topology_graph(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let (local_nodes, public_nodes) = build_remote_nodes(app);
-    let hs = crate::app::safe_lock(&app.health_prober.status, "topology::render");
+    let hs = app.health_prober.status();
 
     // Layout: [SELF + LAN peers] ─ ROUTER ─ ISP ─ [public peers]
     let router_w = 16u16;
@@ -322,7 +322,7 @@ fn render_topology_graph(f: &mut Frame, app: &App, area: Rect) {
     let selected = if combined_len == 0 {
         0
     } else {
-        app.scroll.topology_scroll.min(combined_len - 1)
+        app.ui.scroll.topology_scroll.min(combined_len - 1)
     };
     let local_selected = if selected < local_nodes.len() {
         Some(selected)

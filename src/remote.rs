@@ -98,7 +98,7 @@ impl RemotePublisher {
             .collect();
 
         let health_json = {
-            let status = safe_lock(&health.status, "remote::collect_snapshot::health");
+            let status = health.status();
             json!({
                 "gateway_rtt_ms": status.gateway_rtt_ms,
                 "gateway_loss_pct": status.gateway_loss_pct,
@@ -107,11 +107,7 @@ impl RemotePublisher {
             })
         };
 
-        let conn_count = connections
-            .connections
-            .lock()
-            .map(|c| c.len() as u32)
-            .unwrap_or(0);
+        let conn_count = connections.connections().len() as u32;
 
         let tcp_states = collect_tcp_states(&connections);
         let system = collect_system_metrics();
@@ -383,7 +379,7 @@ fn collect_disk_usage() -> Vec<serde_json::Value> {
 }
 
 fn collect_tcp_states(connections: &ConnectionCollector) -> (u32, u32) {
-    let conns = safe_lock(&connections.connections, "remote::collect_tcp_states");
+    let conns = connections.connections();
     let mut time_wait = 0u32;
     let mut close_wait = 0u32;
     for conn in conns.iter() {
