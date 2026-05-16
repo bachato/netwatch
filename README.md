@@ -23,6 +23,10 @@
   <em>Launch → see every interface, connection, and health probe instantly. Arm the flight recorder before an incident disappears.</em>
 </p>
 
+<p align="center">
+  <em>Siblings: <a href="https://github.com/matthart1983/syswatch">SysWatch</a> (system) and <a href="https://github.com/matthart1983/diskwatch">DiskWatch</a> (disk). Same chrome. Different surface.</em>
+</p>
+
 ---
 
 ## Install
