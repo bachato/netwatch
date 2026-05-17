@@ -283,6 +283,7 @@ mod tests {
             rx_rate: rx,
             tx_rate: tx,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 

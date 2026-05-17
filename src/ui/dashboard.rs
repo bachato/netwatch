@@ -617,7 +617,11 @@ fn render_top_connections(f: &mut Frame, app: &App, area: Rect) {
             continue;
         }
         let proc = c.process_name.clone().unwrap_or_else(|| "—".into());
-        let host = remote_host_only(&c.remote_addr);
+        // Prefer DPI-extracted hostname (TLS SNI / QUIC SNI / HTTP
+        // Host) over the raw remote IP. Turns "172.217.x.x" into
+        // "youtube.com" / etc. at the top of the dashboard.
+        let host =
+            dpi_hostname(&c.app_protocol).unwrap_or_else(|| remote_host_only(&c.remote_addr));
         let key = (proc.clone(), host.clone());
         let entry = grouped.entry(key).or_insert_with(|| GroupedConn {
             process: proc.clone(),
@@ -1252,6 +1256,19 @@ fn format_rate_split(bytes_per_sec: f64) -> (String, String) {
         (bytes_per_sec, "B/s")
     };
     (format!("{:.1}", val), unit.to_string())
+}
+
+/// DPI-derived display hostname for a connection, when available.
+/// Used by the dashboard's TOP CONNECTIONS panel to surface real
+/// hostnames (`youtube.com`) instead of raw IPs (`172.217.x.x`).
+fn dpi_hostname(app_proto: &Option<crate::dpi::AppProtocol>) -> Option<String> {
+    use crate::dpi::AppProtocol::*;
+    match app_proto {
+        Some(Tls { sni: Some(h), .. }) => Some(h.clone()),
+        Some(Quic { sni: Some(h) }) => Some(h.clone()),
+        Some(Http { host: Some(h), .. }) => Some(h.clone()),
+        _ => None,
+    }
 }
 
 fn remote_host_only(addr: &str) -> String {

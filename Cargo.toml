@@ -1,6 +1,6 @@
 [package]
 name = "netwatch-tui"
-version = "0.15.12"
+version = "0.16.0"
 edition = "2021"
 authors = ["Matt Hartley <matthew.t.hartley@gmail.com>"]
 description = "Real-time network diagnostics in your terminal. One command, zero config, instant visibility."
@@ -41,6 +41,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 anyhow = "1"
 chrono = "0.4"
 pcap = "2"
+# Deep packet inspection: TLS ClientHello / SNI extraction (rusticata / Suricata folks)
+# and HTTP request line parsing. Both small, well-maintained, permissive-licensed.
+tls-parser = "0.12"
+httparse = "1.10"
+# QUIC Initial decryption (Phase 9 hard mode) uses ring's `aead::quic`
+# header-protection primitive + `aead::AES_128_GCM` + the `hkdf` module.
+# ring is already a direct dep above for TLS work.
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }

@@ -680,6 +680,7 @@ mod tests {
             tcp_flags: Some(0x02),
             expert,
             timestamp_ns: 1,
+            app_protocol: None,
         }
     }
 
@@ -695,6 +696,7 @@ mod tests {
             rx_rate: None,
             tx_rate: None,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 

@@ -861,9 +861,13 @@ impl App {
             self.config_collector.update();
         }
 
-        // Refresh connections every ~2 ticks (2s)
+        // Refresh connections on every tick (~1s). `update()` short-
+        // circuits when the previous spawn hasn't finished yet, so the
+        // effective cadence is `max(tick_interval, lsof_duration)`.
+        // Was 2s but new flows felt sluggish to appear — 1s is closer
+        // to what users expect from a real-time tool.
         self.conn_tick += 1;
-        if self.conn_tick >= 2 {
+        if self.conn_tick >= 1 {
             self.conn_tick = 0;
             self.connection_collector.update();
             let conns = self.connection_collector.connections();
@@ -2311,6 +2315,7 @@ mod tests {
             rx_rate: None,
             tx_rate: None,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 
@@ -2446,6 +2451,7 @@ mod tests {
             rx_rate: rx,
             tx_rate: tx,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 

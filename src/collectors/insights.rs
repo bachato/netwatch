@@ -529,6 +529,7 @@ mod tests {
             tcp_flags: None,
             expert,
             timestamp_ns: 0,
+            app_protocol: None,
         }
     }
 
@@ -544,6 +545,7 @@ mod tests {
             rx_rate: None,
             tx_rate: None,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 

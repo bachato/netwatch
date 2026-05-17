@@ -1,6 +1,7 @@
 pub mod app;
 pub mod collectors;
 pub mod config;
+pub mod dpi;
 pub mod ebpf;
 pub mod event;
 pub mod graph;

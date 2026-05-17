@@ -211,6 +211,46 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
                 .map(|i| format!("#{i}"))
                 .unwrap_or_default();
 
+            // Prefer the DPI-decoded info when we have a hostname —
+            // turns generic "ACK" / "Length=64" rows into actionable
+            // "HTTPS api.example.com" / "QUIC youtube.com" / "DNS
+            // example.com" lines. Falls back to the L4 info otherwise.
+            let info_text = match &pkt.app_protocol {
+                Some(crate::dpi::AppProtocol::Tls {
+                    sni: Some(host), ..
+                }) => {
+                    format!("HTTPS {}", host)
+                }
+                Some(crate::dpi::AppProtocol::Quic { sni: Some(host) }) => {
+                    format!("QUIC {}", host)
+                }
+                Some(crate::dpi::AppProtocol::Http {
+                    method,
+                    host: Some(h),
+                }) => format!("HTTP {} {}", method, h),
+                Some(crate::dpi::AppProtocol::Dns { qname, .. }) => format!("DNS {}", qname),
+                Some(crate::dpi::AppProtocol::Ssh { version }) => version.clone(),
+                _ => pkt.info.clone(),
+            };
+            // Color the INFO column by L7 app protocol so the eye can
+            // group rows at a glance: HTTPS/QUIC cyan, HTTP green, DNS
+            // brand, SSH yellow. Falls through to default when no DPI
+            // result is attached.
+            let info_style = match &pkt.app_protocol {
+                Some(crate::dpi::AppProtocol::Tls { .. })
+                | Some(crate::dpi::AppProtocol::Quic { .. }) => {
+                    Style::default().fg(app.theme.status_info)
+                }
+                Some(crate::dpi::AppProtocol::Http { .. }) => {
+                    Style::default().fg(app.theme.status_good)
+                }
+                Some(crate::dpi::AppProtocol::Dns { .. }) => Style::default().fg(app.theme.brand),
+                Some(crate::dpi::AppProtocol::Ssh { .. }) => {
+                    Style::default().fg(app.theme.status_warn)
+                }
+                None => Style::default(),
+            };
+
             Row::new(vec![
                 Cell::from(expert_icon).style(expert_style),
                 Cell::from(pkt.id.to_string()).style(Style::default().fg(app.theme.text_muted)),
@@ -220,7 +260,7 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
                 Cell::from(pkt.protocol.clone()).style(proto_style),
                 Cell::from(pkt.length.to_string()),
                 Cell::from(stream_label).style(Style::default().fg(app.theme.text_muted)),
-                Cell::from(truncate_info(&pkt.info, 40)),
+                Cell::from(truncate_info(&info_text, 40)).style(info_style),
             ])
             .style(row_style)
         })
@@ -373,6 +413,29 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
                 .collect();
             detail_lines.extend(geo_lines);
             detail_lines.extend(whois_lines);
+
+            // QUIC frame breakdown — for UDP packets that look like a
+            // v1/v2 Initial, decrypt and surface CRYPTO / PADDING /
+            // PING frames as a quick decode of what's inside.
+            if pkt.protocol.eq_ignore_ascii_case("UDP") && !pkt.raw_bytes.is_empty() {
+                // Skip Ethernet + IP + UDP headers to get the QUIC
+                // payload. extract_app_payload handles that; we reuse
+                // the same path the capture loop does.
+                let app_payload =
+                    crate::collectors::packets::extract_udp_app_payload(&pkt.raw_bytes);
+                if let Some(frames) = crate::dpi::quic::decode_initial_frame_summary(&app_payload) {
+                    detail_lines.push(Line::from(Span::styled(
+                        "  ── QUIC decoded ──",
+                        Style::default().fg(app.theme.status_info).bold(),
+                    )));
+                    for line in frames {
+                        detail_lines.push(Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(app.theme.status_info),
+                        )));
+                    }
+                }
+            }
 
             // TCP handshake timing (if this packet belongs to a stream with handshake data)
             if let Some(stream_idx) = pkt.stream_index {

@@ -44,6 +44,12 @@ pub struct Connection {
     pub tx_rate: Option<f64>,
     #[serde(default)]
     pub attribution: AttributionSource,
+    /// Application-layer protocol detected by `crate::dpi` from the
+    /// first non-trivial payload seen on this flow. `None` when capture
+    /// isn't running, the flow hasn't been seen, or no classifier
+    /// matched.
+    #[serde(default)]
+    pub app_protocol: Option<crate::dpi::AppProtocol>,
 }
 
 /// Which side of a canonical `StreamKey` the connection's local endpoint sits on.
@@ -95,6 +101,31 @@ fn normalize_ip(ip: &str) -> String {
         }
     }
     ip.to_string()
+}
+
+/// Last-resort match for UDP Connections whose remote is wildcard
+/// (typical of `lsof`'s view of QUIC sockets on macOS). Returns the
+/// AppProtocol of any tracked Stream that shares the Connection's
+/// local endpoint, or `None` if no such Stream exists.
+fn match_udp_app_protocol_by_local(
+    conn: &Connection,
+    app_protos: &HashMap<StreamKey, crate::dpi::AppProtocol>,
+) -> Option<crate::dpi::AppProtocol> {
+    let proto = stream_protocol(&conn.protocol)?;
+    if proto != StreamProtocol::Udp {
+        return None;
+    }
+    let (l_ip, l_port) = parse_host_port(&conn.local_addr)?;
+    let local_endpoint = (l_ip, l_port);
+    for (key, ap) in app_protos {
+        if key.protocol != proto {
+            continue;
+        }
+        if key.addr_a == local_endpoint || key.addr_b == local_endpoint {
+            return Some(ap.clone());
+        }
+    }
+    None
 }
 
 pub fn connection_stream_key(conn: &Connection) -> Option<(StreamKey, LocalSide)> {
@@ -213,8 +244,10 @@ impl ConnectionCollector {
 
     pub fn update(&self) {
         if self.busy.load(Ordering::SeqCst) {
+            tracing::trace!(target: "netwatch::connections", "update() skipped — previous spawn still running");
             return;
         }
+        tracing::trace!(target: "netwatch::connections", "update() spawning lsof");
         self.busy.store(true, Ordering::SeqCst);
         let snapshot = Arc::clone(&self.snapshot);
         let busy = Arc::clone(&self.busy);
@@ -234,7 +267,10 @@ impl ConnectionCollector {
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             let mut result: Vec<Connection> = Vec::new();
 
-            let stream_bytes = stream_tracker.lock().unwrap().snapshot_bytes();
+            let (stream_bytes, app_protos) = {
+                let tracker = stream_tracker.lock().unwrap();
+                (tracker.snapshot_bytes(), tracker.snapshot_app_protocols())
+            };
             let mut state = rate_state.lock().unwrap();
             state.tick(stream_bytes, Instant::now());
             for conn in &mut result {
@@ -242,6 +278,23 @@ impl ConnectionCollector {
                     if let Some((rx, tx)) = state.rate_for(&key, side) {
                         conn.rx_rate = Some(rx);
                         conn.tx_rate = Some(tx);
+                    }
+                    if let Some(proto) = app_protos.get(&key) {
+                        conn.app_protocol = Some(proto.clone());
+                    }
+                } else if conn.app_protocol.is_none() {
+                    // `lsof` typically reports Chrome's QUIC UDP sockets
+                    // with remote `*:*` even though the kernel has a
+                    // specific peer. `connection_stream_key` rejects
+                    // wildcard remotes, so the strict 5-tuple join
+                    // fails and DPI tags never attach. Fall back to a
+                    // local-only match against the StreamTracker
+                    // snapshot — first stream sharing this Connection's
+                    // local endpoint wins. For QUIC each flow has a
+                    // unique local port so the match is unambiguous in
+                    // practice.
+                    if let Some(proto) = match_udp_app_protocol_by_local(conn, &app_protos) {
+                        conn.app_protocol = Some(proto);
                     }
                 }
             }
@@ -257,7 +310,9 @@ impl ConnectionCollector {
                 overlay_ebpf_attribution(&mut result, ebpf);
             }
 
+            let count = result.len();
             *safe_write(&snapshot, "connections::publish") = Arc::new(result);
+            tracing::trace!(target: "netwatch::connections", count, "published connection snapshot");
             busy.store(false, Ordering::SeqCst);
         });
     }
@@ -501,6 +556,7 @@ fn parse_lsof() -> Vec<Connection> {
                 rx_rate: None,
                 tx_rate: None,
                 attribution: AttributionSource::Lsof,
+                app_protocol: None,
             });
             *has_network = false;
         }
@@ -625,6 +681,7 @@ fn parse_linux_connections() -> Vec<Connection> {
                 rx_rate: None,
                 tx_rate: None,
                 attribution: AttributionSource::Lsof,
+                app_protocol: None,
             });
         }
     }
@@ -766,6 +823,7 @@ fn parse_windows_connections() -> Vec<Connection> {
             rx_rate: None,
             tx_rate: None,
             attribution: AttributionSource::Lsof,
+            app_protocol: None,
         })
         .collect()
 }
@@ -839,6 +897,7 @@ mod tests {
             rx_rate: None,
             tx_rate: None,
             attribution: AttributionSource::Lsof,
+            app_protocol: None,
         }
     }
 

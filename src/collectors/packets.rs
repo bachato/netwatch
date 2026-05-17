@@ -49,6 +49,12 @@ pub struct CapturedPacket {
     pub tcp_flags: Option<u8>,
     pub expert: ExpertSeverity,
     pub timestamp_ns: u64,
+    /// L7 protocol classified by `crate::dpi` for this packet's flow,
+    /// snapshotted at capture time. Later packets on the same flow
+    /// carry the most recent classification — including the SNI that
+    /// only becomes available once the ClientHello has been
+    /// reassembled across multiple QUIC Initials.
+    pub app_protocol: Option<crate::dpi::AppProtocol>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +317,18 @@ pub struct Stream {
     pub initiator: Option<(String, u16)>,
     total_payload_bytes: usize,
     pub handshake: Option<TcpHandshake>,
+    /// L7 protocol classified by `crate::dpi` on the first non-trivial
+    /// payload. Cached for the lifetime of the stream.
+    pub app_protocol: Option<crate::dpi::AppProtocol>,
+    /// True once classification has succeeded *or* given up for this
+    /// stream. Prevents repeat work after we've settled on an answer.
+    pub app_protocol_attempted: bool,
+    /// Reassembly buffer for QUIC CRYPTO frames across multiple
+    /// Initial packets. Chrome-class ClientHellos commonly fragment;
+    /// without buffering across packets we miss the SNI extension
+    /// whenever it lands in fragment 2+. Capped at MAX_QUIC_CRYPTO_BUF
+    /// bytes; reset to empty once we've extracted the SNI.
+    quic_crypto_buf: Vec<u8>,
     /// Monotonic ns timestamp of the last packet seen on this flow. Drives LRU
     /// eviction when the tracker exceeds MAX_STREAMS.
     last_seen_ns: u64,
@@ -395,6 +413,9 @@ impl StreamTracker {
                     total_payload_bytes: 0,
                     handshake: None,
                     last_seen_ns: timestamp_ns,
+                    app_protocol: None,
+                    app_protocol_attempted: false,
+                    quic_crypto_buf: Vec::new(),
                 },
             );
             self.evict_if_needed();
@@ -466,6 +487,82 @@ impl StreamTracker {
             stream.total_bytes_b_to_a += payload.len() as u64;
         }
 
+        // DPI classification.
+        //
+        // Two paths:
+        // - TCP and "first payload on UDP" → stateless `classify_once`.
+        //   This covers TLS / HTTP / DNS / SSH and the single-Initial
+        //   QUIC case.
+        // - UDP + QUIC Initial (any time on the flow) → also merge any
+        //   CRYPTO-frame fragments into the per-stream buffer and
+        //   retry SNI extraction. Handles Chrome-class ClientHellos
+        //   that span multiple Initials.
+        const MAX_CLASSIFY_BYTES: usize = 4096;
+        const MAX_QUIC_CRYPTO_BUF: usize = 16 * 1024;
+        let is_tcp = matches!(protocol, StreamProtocol::Tcp);
+
+        if !stream.app_protocol_attempted && payload.len() >= 16 {
+            let slice = &payload[..payload.len().min(MAX_CLASSIFY_BYTES)];
+            stream.app_protocol = crate::dpi::classify_once(slice, is_tcp);
+            // Settle the flag only on a confident answer. A bare
+            // `Quic { sni: None }` means "we know this is QUIC but
+            // haven't extracted the hostname yet" — keep trying on
+            // subsequent Initial packets.
+            stream.app_protocol_attempted = match stream.app_protocol {
+                Some(crate::dpi::AppProtocol::Quic { sni: None }) => false,
+                Some(_) => true,
+                None => true,
+            };
+        }
+
+        // Cross-packet QUIC CRYPTO reassembly. Runs while we still
+        // haven't extracted a hostname for this stream.
+        if !is_tcp
+            && !matches!(
+                stream.app_protocol,
+                Some(crate::dpi::AppProtocol::Quic { sni: Some(_) })
+            )
+            && stream.quic_crypto_buf.len() < MAX_QUIC_CRYPTO_BUF
+            && payload.len() >= 16
+        {
+            if let Some(fragments) = crate::dpi::quic::extract_initial_crypto_frames(payload) {
+                for (offset, data) in fragments {
+                    let end = (offset as usize).saturating_add(data.len());
+                    if end > MAX_QUIC_CRYPTO_BUF {
+                        continue;
+                    }
+                    if stream.quic_crypto_buf.len() < end {
+                        stream.quic_crypto_buf.resize(end, 0);
+                    }
+                    stream.quic_crypto_buf[offset as usize..end].copy_from_slice(&data);
+                }
+                if let Some(host) =
+                    crate::dpi::tls::extract_sni_from_handshake(&stream.quic_crypto_buf)
+                {
+                    tracing::trace!(
+                        target: "netwatch::dpi::quic",
+                        host = %host,
+                        buf_len = stream.quic_crypto_buf.len(),
+                        "SNI extracted after cross-packet reassembly"
+                    );
+                    stream.app_protocol = Some(crate::dpi::AppProtocol::Quic { sni: Some(host) });
+                    stream.app_protocol_attempted = true;
+                    // Release the buffer; we have what we need.
+                    stream.quic_crypto_buf = Vec::new();
+                } else {
+                    tracing::trace!(
+                        target: "netwatch::dpi::quic",
+                        buf_len = stream.quic_crypto_buf.len(),
+                        "reassembled buf still missing SNI — waiting for more Initials"
+                    );
+                    if stream.app_protocol.is_none() {
+                        // At least tag it as QUIC even before full SNI.
+                        stream.app_protocol = Some(crate::dpi::AppProtocol::Quic { sni: None });
+                    }
+                }
+            }
+        }
+
         if !payload.is_empty()
             && stream.segments.len() < MAX_STREAM_SEGMENTS
             && stream.total_payload_bytes < MAX_STREAM_BYTES
@@ -484,6 +581,16 @@ impl StreamTracker {
 
     pub fn get_stream(&self, index: u32) -> Option<&Stream> {
         self.all_streams.get(&index)
+    }
+
+    /// DPI snapshot: classified L7 protocol per stream key. Only flows
+    /// where classification succeeded appear in the map. Cheap clone
+    /// per tick; the per-connection joiner looks up by `StreamKey`.
+    pub fn snapshot_app_protocols(&self) -> HashMap<StreamKey, crate::dpi::AppProtocol> {
+        self.all_streams
+            .values()
+            .filter_map(|s| s.app_protocol.clone().map(|p| (s.key.clone(), p)))
+            .collect()
     }
 
     /// Cumulative payload bytes per stream, keyed by canonical `StreamKey`.
@@ -670,19 +777,25 @@ impl PacketCollector {
                                     StreamProtocol::Udp
                                 };
                                 let payload = extract_app_payload(packet.data, proto);
-                                let idx = tracker.lock().unwrap().track_packet(
-                                    &parsed.src_ip,
-                                    sp,
-                                    &parsed.dst_ip,
-                                    dp,
-                                    proto,
-                                    &payload,
-                                    parsed.id,
-                                    &parsed.timestamp,
-                                    parsed.tcp_flags,
-                                    parsed.timestamp_ns,
-                                );
+                                let (idx, app_proto) = {
+                                    let mut t = tracker.lock().unwrap();
+                                    let i = t.track_packet(
+                                        &parsed.src_ip,
+                                        sp,
+                                        &parsed.dst_ip,
+                                        dp,
+                                        proto,
+                                        &payload,
+                                        parsed.id,
+                                        &parsed.timestamp,
+                                        parsed.tcp_flags,
+                                        parsed.timestamp_ns,
+                                    );
+                                    let ap = t.get_stream(i).and_then(|s| s.app_protocol.clone());
+                                    (i, ap)
+                                };
                                 parsed.stream_index = Some(idx);
+                                parsed.app_protocol = app_proto;
                             }
                             batch.push(parsed);
                             if batch.len() >= CAPTURE_BATCH_SIZE {
@@ -1943,7 +2056,14 @@ fn build_packet(
         tcp_flags,
         expert,
         timestamp_ns,
+        app_protocol: None,
     }
+}
+
+/// UDP-specific shortcut for the Packets-tab detail pane. Avoids
+/// requiring callers to construct a `StreamProtocol` value.
+pub fn extract_udp_app_payload(raw: &[u8]) -> Vec<u8> {
+    extract_app_payload(raw, StreamProtocol::Udp)
 }
 
 fn extract_app_payload(raw: &[u8], proto: StreamProtocol) -> Vec<u8> {
@@ -2304,6 +2424,14 @@ pub enum FilterExpr {
     Port(u16),
     Stream(u32),
     Contains(String),
+    /// `app:tls`, `app:quic`, `app:dns`, `app:http`, `app:ssh` — matches
+    /// the L7 protocol tag carried on `pkt.app_protocol`. Distinct from
+    /// `Protocol` which matches the L4 string in `pkt.protocol`.
+    AppProto(String),
+    /// `sni:hostname` — substring match against TLS or QUIC SNI.
+    Sni(String),
+    /// `host:hostname` — substring match against HTTP Host header.
+    Host(String),
     Not(Box<FilterExpr>),
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
@@ -2454,6 +2582,28 @@ fn parse_atom(tokens: &[String]) -> Option<(FilterExpr, &[String])> {
 
     let word = &tokens[0];
 
+    // DPI-aware prefixes: `app:`, `sni:`, `host:`. Single-token form
+    // because the tokenizer doesn't split on `:`. Reuses the same
+    // shape used by the Connections tab filter chips.
+    if let Some(val) = word.strip_prefix("app:") {
+        return Some((
+            FilterExpr::AppProto(val.trim_matches('"').to_lowercase()),
+            &tokens[1..],
+        ));
+    }
+    if let Some(val) = word.strip_prefix("sni:") {
+        return Some((
+            FilterExpr::Sni(val.trim_matches('"').to_lowercase()),
+            &tokens[1..],
+        ));
+    }
+    if let Some(val) = word.strip_prefix("host:") {
+        return Some((
+            FilterExpr::Host(val.trim_matches('"').to_lowercase()),
+            &tokens[1..],
+        ));
+    }
+
     // Bare IP address (contains a dot and digits)
     if word.contains('.') && word.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return Some((FilterExpr::Ip(word.to_string()), &tokens[1..]));
@@ -2496,6 +2646,29 @@ pub fn matches_packet(expr: &FilterExpr, pkt: &CapturedPacket) -> bool {
                     .as_ref()
                     .is_some_and(|h| h.to_lowercase().contains(s))
         }
+        FilterExpr::AppProto(tag) => match &pkt.app_protocol {
+            Some(crate::dpi::AppProtocol::Tls { .. }) => "tls" == tag.as_str(),
+            Some(crate::dpi::AppProtocol::Quic { .. }) => "quic" == tag.as_str(),
+            Some(crate::dpi::AppProtocol::Http { .. }) => "http" == tag.as_str(),
+            Some(crate::dpi::AppProtocol::Dns { .. }) => "dns" == tag.as_str(),
+            Some(crate::dpi::AppProtocol::Ssh { .. }) => "ssh" == tag.as_str(),
+            None => false,
+        },
+        FilterExpr::Sni(needle) => match &pkt.app_protocol {
+            Some(crate::dpi::AppProtocol::Tls { sni: Some(h), .. }) => {
+                h.to_lowercase().contains(needle.as_str())
+            }
+            Some(crate::dpi::AppProtocol::Quic { sni: Some(h) }) => {
+                h.to_lowercase().contains(needle.as_str())
+            }
+            _ => false,
+        },
+        FilterExpr::Host(needle) => match &pkt.app_protocol {
+            Some(crate::dpi::AppProtocol::Http { host: Some(h), .. }) => {
+                h.to_lowercase().contains(needle.as_str())
+            }
+            _ => false,
+        },
         FilterExpr::Not(inner) => !matches_packet(inner, pkt),
         FilterExpr::And(a, b) => matches_packet(a, pkt) && matches_packet(b, pkt),
         FilterExpr::Or(a, b) => matches_packet(a, pkt) || matches_packet(b, pkt),
@@ -2573,6 +2746,7 @@ mod tests {
             tcp_flags: None,
             expert: ExpertSeverity::Chat,
             timestamp_ns: 0,
+            app_protocol: None,
         }
     }
 

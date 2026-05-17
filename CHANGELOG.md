@@ -2,6 +2,32 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.16.0] - 2026-05-17
+
+### Added
+- **Deep packet inspection (DPI) — see what each flow is actually doing, not just where it's going.** New `dpi` module classifies the application-layer protocol of every captured stream from its first non-trivial payload. Surfaces results across the entire UI:
+  - **Connections tab** gets a new `APP` column showing `HTTPS api.anthropic.com` / `QUIC youtube.com` / `DNS example.com` / `SSH-2.0-OpenSSH_9.0` per row.
+  - **Packets tab** `INFO` column shows the same DPI summary per packet (with subsequent packets on a flow inheriting the cached classification), and rows are color-coded by L7 protocol (cyan HTTPS/QUIC, green HTTP, brand DNS, yellow SSH) so the eye can group flows at a glance.
+  - **Dashboard TOP CONNECTIONS** panel substitutes the DPI hostname for the raw remote IP — `172.217.x.x` becomes `youtube.com`, grouping collapses by service rather than per remote address.
+  - **Packets tab detail pane** now decodes QUIC v1/v2 Initial packets: derives Initial keys via HKDF, strips header protection, AEAD-decrypts, and surfaces the inner frame structure (`CRYPTO offset=0 len=600`, `PADDING bytes=584`, etc.). This is the differentiator vs. peers — most network TUIs can't decrypt QUIC, so they can't show what's inside a QUIC Initial at all.
+  - **Filter prefixes** in the Packets and Connections tabs: `app:tls`, `app:quic`, `app:dns`, `sni:reddit.com`, `host:api.example.com`. Same syntax across both tabs.
+- **TLS classifier** — parses ClientHello via `tls-parser`, extracts SNI hostname + ALPN protocol. TLS 1.0–1.3.
+- **QUIC classifier** — implements full RFC 9001 (QUIC v1) and RFC 9369 (QUIC v2) Initial-packet decryption: HKDF-Expand-Label key derivation, AES-128-ECB-derived header-protection mask, AES-128-GCM AEAD with `nonce = iv XOR pn`, CRYPTO-frame walk. Reuses the TLS classifier on the reassembled ClientHello to extract SNI.
+- **Cross-packet QUIC reassembly** — Chrome's modern ClientHellos commonly span multiple Initial packets; the SNI extension can land in fragment 2+. We buffer CRYPTO frames per-stream and retry SNI extraction across packets, capped at 16 KB of accumulated buffer.
+- **DNS classifier** — hand-rolled wire-format parser for the first question's qname + qtype. Handles plain DNS-over-UDP, mDNS (5353), LLMNR (5355). Refuses compression pointers in the question section to keep parsing linear-time.
+- **HTTP classifier** — `httparse`-backed request-line + Host-header extraction.
+- **SSH classifier** — server/client banner-line capture (`SSH-2.0-OpenSSH_9.0`).
+- **`extract_udp_app_payload`** public helper on the packets collector — the UI uses it to feed a captured packet's bytes back through the QUIC decrypt pipeline for the detail-pane frame breakdown.
+
+### Changed
+- **Connections tab refresh cadence** moved from 2 s to 1 s. The `busy` flag still coalesces under load, so the effective cadence becomes `max(tick, lsof_duration)`. New flows now appear within a second of opening on the wire.
+- **Local-only join fallback for wildcard-remote UDP connections.** `lsof` on macOS commonly reports Chrome's QUIC UDP sockets with remote `*:*` even when the kernel has a specific peer. The strict 5-tuple stream join used to drop those — now we fall back to matching by local endpoint, attaching the DPI tag from whichever Stream owns the same local port. For QUIC this is unambiguous (one flow per ephemeral local port) and is the path that lets the APP column light up at all for browser traffic.
+- **307 tests pass** (up from 296), 33.8% line coverage / 44.4% function coverage. New DPI classifiers shipped with their own unit tests (dns 94%, tls 82%, quic 63% incl. the RFC 9001 Appendix A.2 end-to-end test vector that exercises every layer of the decryption stack).
+
+### Fixed
+- **macOS no longer falsely shows "eBPF active"** (this is the v0.15.12 hotfix already released earlier today; preserved here for completeness). The dashboard footer now reads live attribution state via `attribution_status()` and shows `pktap active` on macOS instead of the placeholder.
+- **Demo GIF re-recorded** with the agg/asciinema pipeline so the README capture reflects the v0.15.x UI layout cleanly.
+
 ## [0.15.12] - 2026-05-17
 
 ### Fixed

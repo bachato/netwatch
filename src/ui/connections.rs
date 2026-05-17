@@ -259,10 +259,97 @@ fn active_connection_filter(app: &App) -> Option<String> {
 
 fn matches_filter(conn: &crate::collectors::connections::Connection, filter: &str) -> bool {
     let needle = filter.to_lowercase();
+
+    // Prefix-typed filters: `proto:tls`, `sni:host`, `host:hostname`.
+    // Fall through to free-text matching when no prefix matches.
+    if let Some(stripped) = needle.strip_prefix("proto:") {
+        return app_protocol_tag(&conn.app_protocol)
+            .map(|tag| tag.contains(stripped))
+            .unwrap_or(false);
+    }
+    if let Some(stripped) = needle.strip_prefix("sni:") {
+        return app_protocol_sni(&conn.app_protocol)
+            .map(|s| s.to_lowercase().contains(stripped))
+            .unwrap_or(false);
+    }
+    if let Some(stripped) = needle.strip_prefix("host:") {
+        return app_protocol_host(&conn.app_protocol)
+            .map(|s| s.to_lowercase().contains(stripped))
+            .unwrap_or(false);
+    }
+
     let process = conn.process_name.as_deref().unwrap_or("").to_lowercase();
     let state = conn.state.to_lowercase();
     let remote = conn.remote_addr.to_lowercase();
-    process.contains(&needle) || state.contains(&needle) || remote.contains(&needle)
+    let app_summary = render_app_protocol(&conn.app_protocol).to_lowercase();
+    process.contains(&needle)
+        || state.contains(&needle)
+        || remote.contains(&needle)
+        || app_summary.contains(&needle)
+}
+
+/// Short cell text for the APP column. Empty when no DPI result.
+pub(crate) fn render_app_protocol(p: &Option<crate::dpi::AppProtocol>) -> String {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        None => "—".into(),
+        Some(Tls {
+            sni: Some(host), ..
+        }) => format!("HTTPS {}", host),
+        Some(Tls { sni: None, .. }) => "HTTPS".into(),
+        Some(Http {
+            method,
+            host: Some(h),
+        }) => format!("HTTP {} {}", method, h),
+        Some(Http { method, .. }) => format!("HTTP {}", method),
+        Some(Dns { qname, .. }) => format!("DNS {}", qname),
+        Some(Ssh { version }) => format!("SSH {}", version),
+        Some(Quic { sni: Some(h) }) => format!("QUIC {}", h),
+        Some(Quic { sni: None }) => "QUIC".into(),
+    }
+}
+
+fn app_protocol_tag(p: &Option<crate::dpi::AppProtocol>) -> Option<&'static str> {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        None => None,
+        Some(Tls { .. }) => Some("tls"),
+        Some(Http { .. }) => Some("http"),
+        Some(Dns { .. }) => Some("dns"),
+        Some(Ssh { .. }) => Some("ssh"),
+        Some(Quic { .. }) => Some("quic"),
+    }
+}
+
+fn app_protocol_sni(p: &Option<crate::dpi::AppProtocol>) -> Option<&str> {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        Some(Tls { sni: Some(s), .. }) => Some(s.as_str()),
+        Some(Quic { sni: Some(s) }) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn app_protocol_host(p: &Option<crate::dpi::AppProtocol>) -> Option<&str> {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        Some(Http { host: Some(h), .. }) => Some(h.as_str()),
+        _ => None,
+    }
+}
+
+fn app_protocol_color(
+    p: &Option<crate::dpi::AppProtocol>,
+    t: &crate::theme::Theme,
+) -> ratatui::style::Color {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        None => t.text_muted,
+        Some(Tls { .. }) | Some(Quic { .. }) => t.status_info, // cyan-ish
+        Some(Http { .. }) => t.status_good,                    // green
+        Some(Dns { .. }) => t.brand,                           // brand accent
+        Some(Ssh { .. }) => t.status_warn,                     // yellow
+    }
 }
 
 pub(crate) fn filtered_sorted_conns(app: &App) -> Vec<Connection> {
@@ -383,9 +470,9 @@ fn render_connection_table(f: &mut Frame, app: &App, area: Rect) {
     // is only shown when the user has toggled `g`; it sits between REMOTE and
     // STATE so it qualifies the destination it describes.
     let header_text: &str = if app.ui.show_geo {
-        "  PROCESS              PROTO  REMOTE                          GEO           STATE         RX/s         TX/s     RTT    AGE"
+        "  PROCESS              PROTO  REMOTE                          APP                    GEO           STATE         RX/s         TX/s     RTT    AGE"
     } else {
-        "  PROCESS              PROTO  REMOTE                          STATE         RX/s         TX/s     RTT    AGE"
+        "  PROCESS              PROTO  REMOTE                          APP                    STATE         RX/s         TX/s     RTT    AGE"
     };
     let header_area = Rect {
         x: inner.x + 1,
@@ -521,6 +608,14 @@ fn render_conn_row(
         Span::styled(
             format!("{:<32}", truncate(&conn.remote_addr, 32)),
             Style::default().fg(t.text_primary),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                "{:<22}",
+                truncate(&render_app_protocol(&conn.app_protocol), 22)
+            ),
+            Style::default().fg(app_protocol_color(&conn.app_protocol, t)),
         ),
     ];
 
@@ -1131,6 +1226,7 @@ mod tests {
             rx_rate: None,
             tx_rate: None,
             attribution: Default::default(),
+            app_protocol: None,
         }
     }
 
