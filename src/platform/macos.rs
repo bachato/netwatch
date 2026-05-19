@@ -55,7 +55,18 @@ fn parse_netstat_output(text: &str) -> HashMap<String, InterfaceStats> {
 pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
     let output = Command::new("ifconfig").output()?;
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_ifconfig_output(&text))
+    let mut interfaces = parse_ifconfig_output(&text);
+
+    // Supplement with hardware-port info so we can distinguish Wi-Fi from
+    // wired Ethernet (incl. USB-Ethernet adapters that share the `en` prefix).
+    let wireless = collect_wireless_map();
+    for iface in &mut interfaces {
+        if let Some(&is_wireless) = wireless.get(&iface.name) {
+            iface.is_wireless = Some(is_wireless);
+        }
+    }
+
+    Ok(interfaces)
 }
 
 fn parse_ifconfig_output(text: &str) -> Vec<InterfaceInfo> {
@@ -81,6 +92,7 @@ fn parse_ifconfig_output(text: &str) -> Vec<InterfaceInfo> {
                 mac: None,
                 mtu,
                 is_up,
+                is_wireless: None,
             });
         } else if let Some(ref mut iface) = current {
             let trimmed = line.trim();
@@ -104,6 +116,56 @@ fn parse_ifconfig_output(text: &str) -> Vec<InterfaceInfo> {
     }
 
     interfaces
+}
+
+/// Map BSD device name (e.g. `en0`, `en7`) to whether it's a Wi-Fi adapter.
+/// Built from `networksetup -listallhardwareports`, whose output groups each
+/// adapter as:
+///
+/// ```text
+/// Hardware Port: Wi-Fi
+/// Device: en0
+/// Ethernet Address: aa:bb:cc:dd:ee:ff
+/// ```
+///
+/// Anything labeled `Wi-Fi` (or with `AirPort` for older OSes) counts as
+/// wireless; anything else with a Device line is treated as wired.
+fn collect_wireless_map() -> HashMap<String, bool> {
+    let mut map = HashMap::new();
+
+    let Ok(output) = Command::new("networksetup")
+        .arg("-listallhardwareports")
+        .output()
+    else {
+        return map;
+    };
+    if !output.status.success() {
+        return map;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_hardware_ports(&text, &mut map);
+    map
+}
+
+fn parse_hardware_ports(text: &str, map: &mut HashMap<String, bool>) {
+    let mut current_port: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("Hardware Port:") {
+            current_port = Some(val.trim().to_string());
+        } else if let Some(val) = trimmed.strip_prefix("Device:") {
+            let device = val.trim().to_string();
+            if device.is_empty() {
+                continue;
+            }
+            let is_wireless = current_port
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case("Wi-Fi") || p.eq_ignore_ascii_case("AirPort"))
+                .unwrap_or(false);
+            map.insert(device, is_wireless);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +306,53 @@ en1: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
     fn parse_ifconfig_empty_input() {
         let interfaces = parse_ifconfig_output("");
         assert!(interfaces.is_empty());
+    }
+
+    const HARDWARE_PORTS_OUTPUT: &str = "\
+Hardware Port: Wi-Fi
+Device: en0
+Ethernet Address: aa:bb:cc:dd:ee:ff
+
+Hardware Port: Ethernet Adapter (en7)
+Device: en7
+Ethernet Address: 11:22:33:44:55:66
+
+Hardware Port: Thunderbolt Bridge
+Device: bridge0
+Ethernet Address: 36:d2:4a:74:9d:80
+
+VLAN Configurations
+===================
+";
+
+    #[test]
+    fn parse_hardware_ports_flags_wifi_and_wired() {
+        let mut map = HashMap::new();
+        parse_hardware_ports(HARDWARE_PORTS_OUTPUT, &mut map);
+
+        // The fix for issue #30: an `en*` USB-Ethernet adapter must not be
+        // classified as Wi-Fi just because it shares the `en` prefix.
+        assert_eq!(map.get("en0"), Some(&true), "en0 = Wi-Fi");
+        assert_eq!(map.get("en7"), Some(&false), "en7 = wired USB-Ethernet");
+        assert_eq!(map.get("bridge0"), Some(&false), "bridge0 = wired");
+    }
+
+    #[test]
+    fn parse_hardware_ports_ignores_orphan_devices() {
+        // "Device:" line with no preceding "Hardware Port:" — should still
+        // record an entry (defaulting to non-wireless) without panicking.
+        let text = "Device: en9\nEthernet Address: 00:11:22:33:44:55\n";
+        let mut map = HashMap::new();
+        parse_hardware_ports(text, &mut map);
+        assert_eq!(map.get("en9"), Some(&false));
+    }
+
+    #[test]
+    fn parse_hardware_ports_airport_legacy_label() {
+        // Pre-Wi-Fi-rename macOS used "AirPort" as the hardware port label.
+        let text = "Hardware Port: AirPort\nDevice: en1\n";
+        let mut map = HashMap::new();
+        parse_hardware_ports(text, &mut map);
+        assert_eq!(map.get("en1"), Some(&true));
     }
 }

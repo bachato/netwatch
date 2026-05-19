@@ -137,6 +137,13 @@ pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
             if let Some(iface) = current.take() {
                 interfaces.push(iface);
             }
+            let is_wireless = if line.starts_with("Wireless LAN") {
+                Some(true)
+            } else if line.starts_with("Ethernet adapter") {
+                Some(false)
+            } else {
+                None
+            };
             // Extract the adapter name after "adapter " if present, else use the full line
             let name = if let Some(pos) = line.find("adapter ") {
                 line[pos + 8..].trim_end_matches(':').trim().to_string()
@@ -151,6 +158,7 @@ pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
                 mac: None,
                 mtu,
                 is_up: true, // assume up; will set false if "Media disconnected"
+                is_wireless,
             });
         } else if let Some(ref mut iface) = current {
             let trimmed = line.trim();

@@ -44,7 +44,10 @@ pub fn sort_interfaces(
                 let ip_b = info_b.and_then(|i| i.ipv4.as_deref()).unwrap_or("");
                 cmp_ip(ip_a, ip_b)
             }
-            "Role" => cmp_case_insensitive(role_for(&a.name), role_for(&b.name)),
+            "Role" => cmp_case_insensitive(
+                role_for_iface(&a.name, interface_info),
+                role_for_iface(&b.name, interface_info),
+            ),
             "RX/s" | "Rx Rate" | "RX B/s" => cmp_f64(a.rx_rate, b.rx_rate),
             "TX/s" | "Tx Rate" | "TX B/s" => cmp_f64(a.tx_rate, b.tx_rate),
             "RX Total" | "Rx Total" => a.rx_bytes_total.cmp(&b.rx_bytes_total),
@@ -95,10 +98,12 @@ fn apply_filter(interfaces: &mut Vec<InterfaceTraffic>, app: &App) {
         let info = app.interface_info.iter().find(|info| info.name == i.name);
         let is_up = info.map(|inf| inf.is_up).unwrap_or(false);
         let has_traffic = crate::ui::widgets::interface_recently_active(i);
-        let role = role_for(&i.name);
+        let role = role_for(&i.name, info.and_then(|inf| inf.is_wireless));
         match app.ui.interface_filter {
             InterfaceFilter::Active => is_up && has_traffic,
             InterfaceFilter::All => true,
+            // `ethernet/wifi` is the unknown-platform fallback — include it so
+            // the Wi-Fi chip still works when detection isn't available.
             InterfaceFilter::Wifi => role == "wifi" || role == "ethernet/wifi",
             InterfaceFilter::Vpn => role == "vpn",
             InterfaceFilter::Idle => !has_traffic,
@@ -173,7 +178,7 @@ fn chip_counts(interfaces: &[InterfaceTraffic], app: &App) -> ChipCounts {
         let info = app.interface_info.iter().find(|info| info.name == i.name);
         let is_up = info.map(|inf| inf.is_up).unwrap_or(false);
         let has_traffic = crate::ui::widgets::interface_recently_active(i);
-        let role = role_for(&i.name);
+        let role = role_for(&i.name, info.and_then(|inf| inf.is_wireless));
         if is_up && has_traffic {
             counts.active += 1;
         }
@@ -293,7 +298,10 @@ fn render_interface_row(f: &mut Frame, app: &App, inner: Rect, i: usize, iface: 
         ),
         Span::styled(format!(" {:<19}", ip), Style::default().fg(main_color)),
         Span::styled(
-            format!(" {:<11}", role_for(&iface.name)),
+            format!(
+                " {:<11}",
+                role_for(&iface.name, info.and_then(|inf| inf.is_wireless))
+            ),
             Style::default().fg(if active { t.brand } else { t.text_muted }),
         ),
         Span::styled(
@@ -371,7 +379,9 @@ fn render_detail_panel(f: &mut Frame, app: &App, interfaces: &[InterfaceTraffic]
         })
         .map(|m| format!("MTU {}", m))
         .unwrap_or_default();
-    let role = selected.map(|i| role_for(&i.name)).unwrap_or("");
+    let role = selected
+        .map(|i| role_for_iface(&i.name, &app.interface_info))
+        .unwrap_or("");
     let title_right = if !role.is_empty() || !mtu.is_empty() {
         format!(" {}  {}   ↑↓ to switch ", role, mtu)
     } else {
@@ -646,28 +656,61 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
 
 // ── helpers ─────────────────────────────────────────────────
 
-pub fn role_for(name: &str) -> &'static str {
+/// Classify an interface for display. Special-purpose interfaces are
+/// recognized by name (loopback, VPN tunnels, bridges, Apple-specific virtual
+/// links); for physical adapters we consult the OS-provided wireless flag
+/// rather than guessing from the name prefix. macOS in particular hands out
+/// `en*` to both Wi-Fi and USB-Ethernet adapters, so name alone is wrong.
+///
+/// `is_wireless == None` means the platform layer couldn't tell — we fall
+/// back to the hedged `ethernet/wifi` label for `en*`/`wlan*` names so
+/// behaviour matches the pre-detection world for unsupported platforms.
+pub fn role_for(name: &str, is_wireless: Option<bool>) -> &'static str {
     if name == "lo0" || name == "lo" {
-        "loopback"
-    } else if name.starts_with("utun") || name.starts_with("tun") || name.starts_with("wg") {
-        "vpn"
-    } else if name.starts_with("en") {
-        "wifi"
-    } else if name.starts_with("wlan") || name.starts_with("wlp") {
-        "wifi"
-    } else if name.starts_with("anpi") {
-        "apple"
-    } else if name.starts_with("ap") {
-        "ap"
-    } else if name.starts_with("bridge") {
-        "bridge"
-    } else if name.starts_with("awdl") {
-        "awdl"
-    } else if name.starts_with("llw") {
-        "llw"
-    } else {
-        "—"
+        return "loopback";
     }
+    if name.starts_with("utun") || name.starts_with("tun") || name.starts_with("wg") {
+        return "vpn";
+    }
+    if name.starts_with("anpi") {
+        return "apple";
+    }
+    if name.starts_with("ap") {
+        return "ap";
+    }
+    if name.starts_with("bridge") {
+        return "bridge";
+    }
+    if name.starts_with("awdl") {
+        return "awdl";
+    }
+    if name.starts_with("llw") {
+        return "llw";
+    }
+    match is_wireless {
+        Some(true) => "wifi",
+        Some(false) => "ethernet",
+        None => {
+            if name.starts_with("en") || name.starts_with("wlan") || name.starts_with("wlp") {
+                "ethernet/wifi"
+            } else {
+                "—"
+            }
+        }
+    }
+}
+
+/// Convenience: look up the role from `interface_info` by name. Returns the
+/// `None`-fallback role when the interface isn't in the slice.
+pub fn role_for_iface(
+    name: &str,
+    interface_info: &[crate::platform::InterfaceInfo],
+) -> &'static str {
+    let is_wireless = interface_info
+        .iter()
+        .find(|i| i.name == name)
+        .and_then(|i| i.is_wireless);
+    role_for(name, is_wireless)
 }
 
 fn pad_history(data: &[u64], target_width: usize) -> Vec<u64> {
@@ -680,4 +723,38 @@ fn pad_history(data: &[u64], target_width: usize) -> Vec<u64> {
     let mut padded = vec![0u64; target_width - data.len()];
     padded.extend_from_slice(data);
     padded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::role_for;
+
+    #[test]
+    fn role_for_uses_wireless_flag_over_name_prefix() {
+        // The bug from issue #30: USB-Ethernet adapters land on `en*` names
+        // but are wired. With the OS-provided flag we now classify correctly.
+        assert_eq!(role_for("en0", Some(true)), "wifi");
+        assert_eq!(role_for("en7", Some(false)), "ethernet");
+        assert_eq!(role_for("wlan0", Some(true)), "wifi");
+    }
+
+    #[test]
+    fn role_for_special_names_ignore_wireless_flag() {
+        // Loopback / VPN / bridge classification is name-driven; even if a
+        // platform mislabels them, we shouldn't promote them to wifi/ethernet.
+        assert_eq!(role_for("lo0", Some(true)), "loopback");
+        assert_eq!(role_for("utun3", Some(false)), "vpn");
+        assert_eq!(role_for("bridge0", Some(false)), "bridge");
+        assert_eq!(role_for("awdl0", None), "awdl");
+        assert_eq!(role_for("anpi0", None), "apple");
+    }
+
+    #[test]
+    fn role_for_unknown_wireless_falls_back_to_hedge() {
+        // When the platform can't tell us, keep the pre-detection behavior so
+        // the Wi-Fi filter chip still matches `en*`/`wlan*` adapters.
+        assert_eq!(role_for("en0", None), "ethernet/wifi");
+        assert_eq!(role_for("wlan0", None), "ethernet/wifi");
+        assert_eq!(role_for("somethingelse", None), "—");
+    }
 }

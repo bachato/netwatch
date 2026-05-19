@@ -2715,6 +2715,7 @@ mod tests {
                 mac: Some("ff:ff:ff:ff:ff:ff".into()),
                 mtu: Some(9000),
                 is_up: true,
+                is_wireless: None,
             },
             InterfaceInfo {
                 name: "aa".into(),
@@ -2723,6 +2724,7 @@ mod tests {
                 mac: Some("00:00:00:00:00:00".into()),
                 mtu: Some(1500),
                 is_up: false,
+                is_wireless: None,
             },
         ];
         let make = || {
@@ -2763,6 +2765,7 @@ mod tests {
                 mac: Some("ff:ff:ff:ff:ff:ff".into()),
                 mtu: Some(9000),
                 is_up: true,
+                is_wireless: Some(true),
             },
             InterfaceInfo {
                 name: "lo0".into(),
@@ -2771,6 +2774,7 @@ mod tests {
                 mac: Some("00:00:00:00:00:00".into()),
                 mtu: Some(1500),
                 is_up: false,
+                is_wireless: None,
             },
         ];
         let make = || {

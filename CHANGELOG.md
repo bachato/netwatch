@@ -2,6 +2,15 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.16.2] - 2026-05-20
+
+### Fixed
+- **USB-Ethernet adapters no longer mislabeled as Wi-Fi on the Interfaces tab** (#30). macOS hands out `en*` names to both the built-in Wi-Fi adapter and to USB / Thunderbolt Ethernet dongles, so the old name-prefix classifier flagged everything starting with `en` as `"wifi"` — the Dashboard at least hedged with `"ethernet/wifi"`, which made the two tabs visibly disagree. We now ask the OS what the adapter actually is and propagate that through a new `is_wireless` field on `InterfaceInfo`:
+  - **macOS**: parses `networksetup -listallhardwareports` and matches BSD device → `Hardware Port: Wi-Fi` (or legacy `AirPort`).
+  - **Linux**: presence of `/sys/class/net/<name>/wireless` (kernel-authoritative).
+  - **Windows**: adapter-header type from `ipconfig /all` (`Wireless LAN adapter` vs `Ethernet adapter`).
+  Wired adapters now render as `ethernet` everywhere; the `"ethernet/wifi"` hedge survives only as the fallback when detection is unavailable. The two duplicate `role_for()` helpers in `ui/interfaces.rs` and `ui/dashboard.rs` have been collapsed into one — the divergence between them was what produced the inconsistent labels in the first place.
+
 ## [0.16.1] - 2026-05-18
 
 ### Fixed

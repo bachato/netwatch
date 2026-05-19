@@ -72,6 +72,18 @@ pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
         // Get IP addresses from `ip addr show <name>` on Linux
         let (ipv4, ipv6) = get_ip_addresses(&name);
 
+        // /sys/class/net/<name>/wireless is present iff the kernel registered
+        // the device as 802.11 wireless. Absent for wired/virtual interfaces.
+        let is_wireless = if base.join("wireless").exists() {
+            Some(true)
+        } else if mac.is_some() {
+            // Has a MAC address but no wireless dir → wired Ethernet (or other
+            // L2 device the kernel doesn't tag as wireless).
+            Some(false)
+        } else {
+            None
+        };
+
         interfaces.push(InterfaceInfo {
             name,
             ipv4,
@@ -79,6 +91,7 @@ pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
             mac,
             mtu,
             is_up,
+            is_wireless,
         });
     }
 

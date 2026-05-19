@@ -32,6 +32,10 @@ pub struct InterfaceInfo {
     pub mac: Option<String>,
     pub mtu: Option<u32>,
     pub is_up: bool,
+    /// `Some(true)` for wireless (Wi-Fi), `Some(false)` for wired Ethernet,
+    /// `None` when the OS didn't give us a definitive answer (e.g. loopback,
+    /// VPN, virtual interfaces — or the lookup failed).
+    pub is_wireless: Option<bool>,
 }
 
 pub fn collect_interface_stats() -> Result<HashMap<String, InterfaceStats>> {

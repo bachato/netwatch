@@ -275,7 +275,7 @@ fn render_active_interface(f: &mut Frame, app: &App, area: Rect) {
             .and_then(|i| i.ipv4.clone())
             .unwrap_or_else(|| "—".into());
         let mtu = info.and_then(|i| i.mtu).unwrap_or(0);
-        let role = role_for(&p.name);
+        let role = crate::ui::interfaces::role_for(&p.name, info.and_then(|i| i.is_wireless));
         let is_up = info.map(|i| i.is_up).unwrap_or(false);
         let status_span = if is_up {
             Span::styled("● UP", Style::default().fg(t.status_good))
@@ -1041,24 +1041,6 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ── helpers ─────────────────────────────────────────────────
-
-fn role_for(name: &str) -> &'static str {
-    if name == "lo0" || name == "lo" {
-        "loopback"
-    } else if name.starts_with("utun") || name.starts_with("tun") || name.starts_with("wg") {
-        "vpn"
-    } else if name.starts_with("en") || name.starts_with("wlan") || name.starts_with("wlp") {
-        "ethernet/wifi"
-    } else if name.starts_with("anpi") || name.starts_with("ap") {
-        "apple"
-    } else if name.starts_with("bridge") {
-        "bridge"
-    } else if name.starts_with("awdl") {
-        "awdl"
-    } else {
-        ""
-    }
-}
 
 /// All UP, non-loopback interfaces — used for the throughput chart and to pick
 /// the primary interface. Sorted by cumulative bytes desc so the busiest iface
