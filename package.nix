@@ -7,7 +7,9 @@
 
 rustPlatform.buildRustPackage {
   pname = "netwatch-tui";
-  version = "0.3.5";
+  # Keep in sync with Cargo.toml's `version` on every release — the Nix
+  # derivation label otherwise drifts from the actual source contents.
+  version = "0.21.3";
 
   src = lib.cleanSource ./.;
 

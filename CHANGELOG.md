@@ -2,6 +2,11 @@
 
 All notable changes to NetWatch will be documented in this file.
 
+## [0.21.3] - 2026-05-24
+
+### Fixed
+- **`package.nix` version bumped to track Cargo.toml.** The Nix derivation was stuck at `version = "0.3.5"` even though the published crate is currently at v0.21.x — Nix users doing `nix build github:matthart1983/netwatch` got a derivation labeled v0.3.5 with the actual current source contents. Bumped to match Cargo.toml + added an inline comment reminding future maintainers to keep the two in sync per release. (Reminder surfaced while wiring up the syswatch sibling's `package.nix` in [syswatch#3](https://github.com/matthart1983/syswatch/issues/3).)
+
 ## [0.21.2] - 2026-05-23
 
 ### Fixed
