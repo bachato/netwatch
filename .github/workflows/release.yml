@@ -9,6 +9,11 @@ on:
         description: 'Tag to release (e.g. v0.21.7). Re-runs the full build/publish pipeline against the given tag.'
         required: true
         type: string
+      skip_homebrew:
+        description: 'Skip the homebrew-tap formula update. Default true on manual dispatch — backfilling an older tag would otherwise downgrade `brew install` users.'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -240,7 +245,12 @@ jobs:
     # Brew has no pre-release concept, so any formula push reaches every
     # `brew upgrade` user. crates.io still publishes — pre-release versions
     # there are opt-in via `cargo install --version`.
-    if: ${{ !contains(inputs.tag || github.ref_name, '-') }}
+    # Skip homebrew when:
+    #   - The tag is a pre-release (e.g. v0.14.0-rc.1) — brew has no
+    #     pre-release concept, so any formula push reaches every user.
+    #   - Manual dispatch with `skip_homebrew: true` (the default) —
+    #     prevents backfilling an older tag from downgrading the formula.
+    if: ${{ !contains(inputs.tag || github.ref_name, '-') && inputs.skip_homebrew != true }}
     runs-on: ubuntu-latest
     steps:
       - name: Compute sha256 for each release asset
