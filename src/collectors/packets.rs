@@ -2620,6 +2620,11 @@ pub enum FilterExpr {
     Sni(String),
     /// `host:hostname` — substring match against HTTP Host header.
     Host(String),
+    /// `ech:true` / `ech:false` — matches the ECH (Encrypted ClientHello)
+    /// presence flag on TLS or QUIC. `true` selects connections where the
+    /// observer cannot see the inner SNI; `false` selects vanilla TLS/QUIC
+    /// connections only (non-TLS/QUIC packets never match either way).
+    Ech(bool),
     Not(Box<FilterExpr>),
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
@@ -2791,6 +2796,17 @@ fn parse_atom(tokens: &[String]) -> Option<(FilterExpr, &[String])> {
             &tokens[1..],
         ));
     }
+    if let Some(val) = word.strip_prefix("ech:") {
+        let want = match val.trim_matches('"').to_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            // Reject anything else; binary flag, no aliases. Bad input
+            // fails the whole filter parse, matching how `port:abc`-style
+            // typos would otherwise become invisible bare-word matches.
+            _ => return None,
+        };
+        return Some((FilterExpr::Ech(want), &tokens[1..]));
+    }
 
     // Bare IP address (contains a dot and digits)
     if word.contains('.') && word.chars().all(|c| c.is_ascii_digit() || c == '.') {
@@ -2863,6 +2879,11 @@ pub fn matches_packet(expr: &FilterExpr, pkt: &CapturedPacket) -> bool {
             Some(crate::dpi::AppProtocol::Http { host: Some(h), .. }) => {
                 h.to_lowercase().contains(needle.as_str())
             }
+            _ => false,
+        },
+        FilterExpr::Ech(want) => match &pkt.app_protocol {
+            Some(crate::dpi::AppProtocol::Tls { ech, .. }) => ech == want,
+            Some(crate::dpi::AppProtocol::Quic { ech, .. }) => ech == want,
             _ => false,
         },
         FilterExpr::Not(inner) => !matches_packet(inner, pkt),
@@ -3319,6 +3340,70 @@ mod tests {
     #[test]
     fn test_filter_empty() {
         assert!(parse_filter("").is_none());
+    }
+    #[test]
+    fn test_filter_ech_true() {
+        let f = parse_filter("ech:true").unwrap();
+        assert!(matches!(f, FilterExpr::Ech(true)));
+    }
+    #[test]
+    fn test_filter_ech_false() {
+        let f = parse_filter("ech:false").unwrap();
+        assert!(matches!(f, FilterExpr::Ech(false)));
+    }
+    #[test]
+    fn test_filter_ech_invalid_rejected() {
+        // Bad value fails the whole parse; saves the user from a typo
+        // (`ech:tru`) silently matching nothing.
+        assert!(parse_filter("ech:maybe").is_none());
+    }
+
+    #[test]
+    fn test_matches_ech_true_on_tls() {
+        let mut pkt = make_packet("TCP", "1.1.1.1", "2.2.2.2", Some(1234), Some(443), "");
+        pkt.app_protocol = Some(crate::dpi::AppProtocol::Tls {
+            sni: Some("cloudflare-ech.com".into()),
+            alpn: None,
+            ech: true,
+        });
+        assert!(matches_packet(&parse_filter("ech:true").unwrap(), &pkt));
+        assert!(!matches_packet(&parse_filter("ech:false").unwrap(), &pkt));
+    }
+    #[test]
+    fn test_matches_ech_true_on_quic() {
+        let mut pkt = make_packet("UDP", "1.1.1.1", "2.2.2.2", Some(1234), Some(443), "");
+        pkt.app_protocol = Some(crate::dpi::AppProtocol::Quic {
+            sni: Some("cloudflare-ech.com".into()),
+            ech: true,
+        });
+        assert!(matches_packet(&parse_filter("ech:true").unwrap(), &pkt));
+    }
+    #[test]
+    fn test_matches_ech_false_on_vanilla_tls() {
+        let mut pkt = make_packet("TCP", "1.1.1.1", "2.2.2.2", Some(1234), Some(443), "");
+        pkt.app_protocol = Some(crate::dpi::AppProtocol::Tls {
+            sni: Some("example.com".into()),
+            alpn: None,
+            ech: false,
+        });
+        assert!(matches_packet(&parse_filter("ech:false").unwrap(), &pkt));
+        assert!(!matches_packet(&parse_filter("ech:true").unwrap(), &pkt));
+    }
+    #[test]
+    fn test_matches_ech_never_matches_non_tls_quic() {
+        // Non-TLS/QUIC packets must not be selected by `ech:false` —
+        // "show me everything without ECH" should not include HTTP, DNS,
+        // ICMP, etc. The flag is only meaningful for TLS/QUIC.
+        let pkt = make_packet("TCP", "1.1.1.1", "2.2.2.2", Some(1234), Some(80), "");
+        assert!(!matches_packet(&parse_filter("ech:false").unwrap(), &pkt));
+        assert!(!matches_packet(&parse_filter("ech:true").unwrap(), &pkt));
+    }
+    #[test]
+    fn test_filter_ech_composable() {
+        // `ech:true and sni:cloudflare` should select ECH-using flows
+        // whose outer SNI mentions cloudflare. Tests parser glue.
+        let f = parse_filter("ech:true and sni:cloudflare").unwrap();
+        assert!(matches!(f, FilterExpr::And(_, _)));
     }
 
     #[test]

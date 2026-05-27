@@ -277,6 +277,20 @@ fn matches_filter(conn: &crate::collectors::connections::Connection, filter: &st
             .map(|s| s.to_lowercase().contains(stripped))
             .unwrap_or(false);
     }
+    if let Some(stripped) = needle.strip_prefix("ech:") {
+        let want = match stripped {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+        return match (want, app_protocol_ech(&conn.app_protocol)) {
+            (Some(w), Some(have)) => w == have,
+            // Bad value or non-TLS/QUIC connection: no match. Mirrors the
+            // Packets-tab semantics where `ech:` is meaningless outside
+            // TLS/QUIC.
+            _ => false,
+        };
+    }
 
     let process = conn.process_name.as_deref().unwrap_or("").to_lowercase();
     let state = conn.state.to_lowercase();
@@ -378,6 +392,15 @@ fn app_protocol_sni(p: &Option<crate::dpi::AppProtocol>) -> Option<&str> {
     match p {
         Some(Tls { sni: Some(s), .. }) => Some(s.as_str()),
         Some(Quic { sni: Some(s), .. }) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn app_protocol_ech(p: &Option<crate::dpi::AppProtocol>) -> Option<bool> {
+    use crate::dpi::AppProtocol::*;
+    match p {
+        Some(Tls { ech, .. }) => Some(*ech),
+        Some(Quic { ech, .. }) => Some(*ech),
         _ => None,
     }
 }
