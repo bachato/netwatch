@@ -178,6 +178,12 @@ impl KeylogStore {
             // files that contain them.
             _ => {}
         }
+        tracing::trace!(
+            target: "netwatch::dpi::tls_decrypt",
+            label = ?label,
+            cr_prefix = %format!("{:02x}{:02x}{:02x}{:02x}", client_random[0], client_random[1], client_random[2], client_random[3]),
+            "ingested keylog line"
+        );
         true
     }
 
@@ -187,10 +193,13 @@ impl KeylogStore {
 }
 
 /// Background watcher that tails `path` (the configured SSLKEYLOGFILE)
-/// and feeds new lines into `store`. Polls every ~500ms — keylog files
-/// are append-only and tiny, so polling is cheap and avoids a notify
-/// dependency. Survives file-not-yet-existing (waits for the client
-/// process to create it) and file truncation (resets read offset).
+/// and feeds new lines into `store`. Polls every ~100ms — keylog files
+/// are append-only and tiny, so frequent polling is cheap and avoids a
+/// notify dependency. The tight interval shrinks the window in which a
+/// flow's first application-data records arrive before its secret has
+/// been ingested (the capture loop also tolerates that race via
+/// sequence resync). Survives file-not-yet-existing (waits for the
+/// client process to create it) and file truncation (resets offset).
 ///
 /// The returned `WatcherHandle` stops the background thread when dropped.
 pub fn spawn_keylog_watcher(path: PathBuf, store: Arc<KeylogStore>) -> WatcherHandle {
@@ -262,12 +271,12 @@ fn keylog_loop(path: PathBuf, store: Arc<KeylogStore>, stop: Arc<AtomicBool>) {
             }
         }
         // Sleep in small slices so a shutdown signal doesn't have to
-        // wait the full poll interval.
-        for _ in 0..10 {
+        // wait the full ~100ms poll interval.
+        for _ in 0..4 {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(25));
         }
     }
 }
@@ -404,6 +413,62 @@ impl DirectionKeys {
             nonce[4 + i] ^= seq_be[i];
         }
         nonce
+    }
+
+    /// Like [`decrypt_record`](Self::decrypt_record) but tolerant of up
+    /// to `max_skip` records we never observed: tries the expected
+    /// `next_seq` first, then successive sequence numbers, and uses
+    /// whichever authenticates. On success, advances `next_seq` past
+    /// the matched record so the skipped sequence numbers are accounted
+    /// for and subsequent records stay in sync.
+    ///
+    /// `record_ciphertext` is the encrypted payload INCLUDING the AEAD
+    /// tag (it is not mutated; trials run on copies). `aad` is the
+    /// 5-byte record header. Returns `AeadAuthFailed` if nothing in the
+    /// `[next_seq, next_seq + max_skip]` window authenticates — which is
+    /// the expected outcome for a record encrypted under a *different*
+    /// key (e.g. a handshake-secret record carried with outer type
+    /// 0x17), leaving `next_seq` untouched.
+    ///
+    /// The search is forward-only: a record whose true sequence is
+    /// *below* `next_seq` (i.e. arriving late / replayed) will not
+    /// match. With `max_skip == 0` this is equivalent to a
+    /// non-destructive `decrypt_record`.
+    ///
+    /// This recovers the steady-state sequence when the keylog secret
+    /// landed only after the first application-data records had already
+    /// flowed — the watcher-ingest race — and resynchronizes after a
+    /// record we couldn't reassemble (e.g. one spanning TCP segments).
+    pub fn decrypt_record_resync(
+        &mut self,
+        aad: &[u8],
+        record_ciphertext: &[u8],
+        max_skip: u64,
+    ) -> Result<TlsInnerPlaintext, DecryptError> {
+        let tag_len = self.aead.algorithm().tag_len();
+        if record_ciphertext.len() < tag_len {
+            return Err(DecryptError::ShortCiphertext);
+        }
+        let start = self.next_seq;
+        let end = start.saturating_add(max_skip);
+        let mut seq = start;
+        loop {
+            let mut buf = record_ciphertext.to_vec();
+            let nonce = aead::Nonce::assume_unique_for_key(self.nonce_for(seq));
+            if self
+                .aead
+                .open_in_place(nonce, aead::Aad::from(aad), &mut buf)
+                .is_ok()
+            {
+                buf.truncate(buf.len() - tag_len);
+                self.next_seq = seq.checked_add(1).ok_or(DecryptError::SeqOverflow)?;
+                return strip_inner_plaintext(&buf);
+            }
+            if seq >= end {
+                return Err(DecryptError::AeadAuthFailed);
+            }
+            seq = seq.checked_add(1).ok_or(DecryptError::SeqOverflow)?;
+        }
     }
 }
 
@@ -544,6 +609,210 @@ mod tests {
         assert_eq!(
             iv,
             [0x5b, 0x78, 0x92, 0x3d, 0xee, 0x08, 0x57, 0x90, 0x33, 0xe5, 0x23, 0xd9]
+        );
+    }
+
+    // ── full record decrypt (RFC 8448 §3 known-answer) ──────────
+
+    /// End-to-end decrypt of the real "{client} send application_data"
+    /// record from the RFC 8448 §3 Simple 1-RTT Handshake trace. This
+    /// exercises the whole pipeline — `from_traffic_secret` (HKDF key +
+    /// iv derivation) → nonce construction (seq 0) → AEAD open →
+    /// inner-plaintext stripping — against published ground truth from
+    /// an independent implementation. If this passes, decryption of a
+    /// live TLS 1.3 flow with matching keylog secrets is correct.
+    ///
+    /// secret = client_application_traffic_secret_0
+    /// suite  = TLS_AES_128_GCM_SHA256 (16-byte key, SHA-256)
+    /// expected plaintext = 0x00 0x01 .. 0x31 (50 bytes), type 0x17.
+    #[test]
+    fn decrypt_record_matches_rfc8448_client_application_data() {
+        let secret: [u8; 32] = [
+            0x9e, 0x40, 0x64, 0x6c, 0xe7, 0x9a, 0x7f, 0x9d, 0xc0, 0x5a, 0xf8, 0x88, 0x9b, 0xce,
+            0x65, 0x52, 0x87, 0x5a, 0xfa, 0x0b, 0x06, 0xdf, 0x00, 0x87, 0xf7, 0x92, 0xeb, 0xb7,
+            0xc1, 0x75, 0x04, 0xa5,
+        ];
+        // Complete TLS record from RFC 8448: 5-byte header + 67-byte
+        // ciphertext-with-tag.
+        let record: [u8; 72] = [
+            0x17, 0x03, 0x03, 0x00, 0x43, // header (aad)
+            0xa2, 0x3f, 0x70, 0x54, 0xb6, 0x2c, 0x94, 0xd0, 0xaf, 0xfa, 0xfe, 0x82, 0x28, 0xba,
+            0x55, 0xcb, 0xef, 0xac, 0xea, 0x42, 0xf9, 0x14, 0xaa, 0x66, 0xbc, 0xab, 0x3f, 0x2b,
+            0x98, 0x19, 0xa8, 0xa5, 0xb4, 0x6b, 0x39, 0x5b, 0xd5, 0x4a, 0x9a, 0x20, 0x44, 0x1e,
+            0x2b, 0x62, 0x97, 0x4e, 0x1f, 0x5a, 0x62, 0x92, 0xa2, 0x97, 0x70, 0x14, 0xbd, 0x1e,
+            0x3d, 0xea, 0xe6, 0x3a, 0xee, 0xbb, 0x21, 0x69, 0x49, 0x15, 0xe4,
+        ];
+        let aad = &record[..5];
+        let mut ciphertext = record[5..].to_vec();
+
+        let mut keys = DirectionKeys::from_traffic_secret(CipherSuite::Aes128GcmSha256, &secret);
+        let inner = keys
+            .decrypt_record(aad, &mut ciphertext)
+            .expect("RFC 8448 record must decrypt and authenticate");
+
+        let expected: Vec<u8> = (0x00u8..=0x31).collect();
+        assert_eq!(inner.content, expected, "recovered plaintext mismatch");
+        assert_eq!(inner.content_type, 0x17, "expected application_data");
+        // Sequence advanced for the next record on this direction.
+        assert_eq!(keys.next_seq, 1);
+    }
+
+    /// A tampered ciphertext (one flipped byte) must fail the AEAD auth
+    /// tag check rather than returning garbage plaintext.
+    #[test]
+    fn decrypt_record_rejects_tampered_ciphertext() {
+        let secret: [u8; 32] = [
+            0x9e, 0x40, 0x64, 0x6c, 0xe7, 0x9a, 0x7f, 0x9d, 0xc0, 0x5a, 0xf8, 0x88, 0x9b, 0xce,
+            0x65, 0x52, 0x87, 0x5a, 0xfa, 0x0b, 0x06, 0xdf, 0x00, 0x87, 0xf7, 0x92, 0xeb, 0xb7,
+            0xc1, 0x75, 0x04, 0xa5,
+        ];
+        let aad = [0x17, 0x03, 0x03, 0x00, 0x43];
+        let mut ciphertext = vec![
+            0xa2, 0x3f, 0x70, 0x54, 0xb6, 0x2c, 0x94, 0xd0, 0xaf, 0xfa, 0xfe, 0x82, 0x28, 0xba,
+            0x55, 0xcb, 0xef, 0xac, 0xea, 0x42, 0xf9, 0x14, 0xaa, 0x66, 0xbc, 0xab, 0x3f, 0x2b,
+            0x98, 0x19, 0xa8, 0xa5, 0xb4, 0x6b, 0x39, 0x5b, 0xd5, 0x4a, 0x9a, 0x20, 0x44, 0x1e,
+            0x2b, 0x62, 0x97, 0x4e, 0x1f, 0x5a, 0x62, 0x92, 0xa2, 0x97, 0x70, 0x14, 0xbd, 0x1e,
+            0x3d, 0xea, 0xe6, 0x3a, 0xee, 0xbb, 0x21, 0x69, 0x49, 0x15, 0xe4,
+        ];
+        ciphertext[0] ^= 0x01; // flip one bit of the first ciphertext byte
+        let mut keys = DirectionKeys::from_traffic_secret(CipherSuite::Aes128GcmSha256, &secret);
+        assert_eq!(
+            keys.decrypt_record(&aad, &mut ciphertext),
+            Err(DecryptError::AeadAuthFailed)
+        );
+    }
+
+    /// Wrong sequence number (decrypting record 0 as if it were record
+    /// 1) changes the nonce and must fail authentication — guards the
+    /// per-direction `next_seq` counter against silent corruption.
+    #[test]
+    fn decrypt_record_wrong_sequence_fails_auth() {
+        let secret: [u8; 32] = [
+            0x9e, 0x40, 0x64, 0x6c, 0xe7, 0x9a, 0x7f, 0x9d, 0xc0, 0x5a, 0xf8, 0x88, 0x9b, 0xce,
+            0x65, 0x52, 0x87, 0x5a, 0xfa, 0x0b, 0x06, 0xdf, 0x00, 0x87, 0xf7, 0x92, 0xeb, 0xb7,
+            0xc1, 0x75, 0x04, 0xa5,
+        ];
+        let aad = [0x17, 0x03, 0x03, 0x00, 0x43];
+        let mut ciphertext = vec![
+            0xa2, 0x3f, 0x70, 0x54, 0xb6, 0x2c, 0x94, 0xd0, 0xaf, 0xfa, 0xfe, 0x82, 0x28, 0xba,
+            0x55, 0xcb, 0xef, 0xac, 0xea, 0x42, 0xf9, 0x14, 0xaa, 0x66, 0xbc, 0xab, 0x3f, 0x2b,
+            0x98, 0x19, 0xa8, 0xa5, 0xb4, 0x6b, 0x39, 0x5b, 0xd5, 0x4a, 0x9a, 0x20, 0x44, 0x1e,
+            0x2b, 0x62, 0x97, 0x4e, 0x1f, 0x5a, 0x62, 0x92, 0xa2, 0x97, 0x70, 0x14, 0xbd, 0x1e,
+            0x3d, 0xea, 0xe6, 0x3a, 0xee, 0xbb, 0x21, 0x69, 0x49, 0x15, 0xe4,
+        ];
+        let mut keys = DirectionKeys::from_traffic_secret(CipherSuite::Aes128GcmSha256, &secret);
+        keys.next_seq = 1; // pretend we already consumed record 0
+        assert_eq!(
+            keys.decrypt_record(&aad, &mut ciphertext),
+            Err(DecryptError::AeadAuthFailed)
+        );
+    }
+
+    // ── sequence resync (watcher-race recovery) ─────────────────
+
+    /// The RFC 8448 client traffic secret, reused so resync tests run
+    /// against real key/iv derivation.
+    const RFC8448_CLIENT_SECRET: [u8; 32] = [
+        0x9e, 0x40, 0x64, 0x6c, 0xe7, 0x9a, 0x7f, 0x9d, 0xc0, 0x5a, 0xf8, 0x88, 0x9b, 0xce, 0x65,
+        0x52, 0x87, 0x5a, 0xfa, 0x0b, 0x06, 0xdf, 0x00, 0x87, 0xf7, 0x92, 0xeb, 0xb7, 0xc1, 0x75,
+        0x04, 0xa5,
+    ];
+
+    /// Seal `plaintext` (+ inner content_type) into a TLS 1.3 record
+    /// ciphertext at sequence `seq`, using the same key schedule the
+    /// decrypter derives. Returns (aad, ciphertext_with_tag).
+    fn seal_record(seq: u64, plaintext: &[u8], content_type: u8) -> (Vec<u8>, Vec<u8>) {
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        let mut buf = plaintext.to_vec();
+        buf.push(content_type);
+        let total = buf.len() + keys.aead.algorithm().tag_len();
+        let aad = vec![0x17, 0x03, 0x03, (total >> 8) as u8, (total & 0xff) as u8];
+        let nonce = aead::Nonce::assume_unique_for_key(keys.nonce_for(seq));
+        keys.aead
+            .seal_in_place_append_tag(nonce, aead::Aad::from(&aad), &mut buf)
+            .unwrap();
+        (aad, buf)
+    }
+
+    #[test]
+    fn resync_decrypts_at_expected_sequence() {
+        let (aad, ct) = seal_record(0, b"hello", 0x17);
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        let inner = keys.decrypt_record_resync(&aad, &ct, 16).unwrap();
+        assert_eq!(inner.content, b"hello");
+        assert_eq!(inner.content_type, 0x17);
+        assert_eq!(keys.next_seq, 1);
+    }
+
+    #[test]
+    fn resync_recovers_when_secrets_arrived_late() {
+        // The record we observe is sequence 5 — the first four records
+        // flowed before the keylog secret was ingested. Decrypter starts
+        // at next_seq=0 and must search forward to find it.
+        let (aad, ct) = seal_record(5, b"GET / HTTP/1.1", 0x17);
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        let inner = keys
+            .decrypt_record_resync(&aad, &ct, 16)
+            .expect("forward search within window must find seq 5");
+        assert_eq!(inner.content, b"GET / HTTP/1.1");
+        // next_seq advances past the matched record so the rest stay in sync.
+        assert_eq!(keys.next_seq, 6);
+    }
+
+    #[test]
+    fn resync_stops_at_window_edge() {
+        // Record is sequence 20 but the window only reaches seq 16.
+        let (aad, ct) = seal_record(20, b"late", 0x17);
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        assert_eq!(
+            keys.decrypt_record_resync(&aad, &ct, 16),
+            Err(DecryptError::AeadAuthFailed)
+        );
+        // A failed search must not advance the sequence counter.
+        assert_eq!(keys.next_seq, 0);
+    }
+
+    #[test]
+    fn resync_does_not_search_backwards() {
+        // Record is sequence 0 but we're already expecting seq 3 — a late
+        // or replayed record must not authenticate.
+        let (aad, ct) = seal_record(0, b"stale", 0x17);
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        keys.next_seq = 3;
+        assert_eq!(
+            keys.decrypt_record_resync(&aad, &ct, 16),
+            Err(DecryptError::AeadAuthFailed)
+        );
+        assert_eq!(keys.next_seq, 3);
+    }
+
+    #[test]
+    fn resync_window_zero_matches_strict_decrypt() {
+        // max_skip=0 only tries the exact next_seq: a seq-2 record fails
+        // when we expect seq 0, just like the strict path.
+        let (aad, ct) = seal_record(2, b"x", 0x17);
+        let mut keys = DirectionKeys::from_traffic_secret(
+            CipherSuite::Aes128GcmSha256,
+            &RFC8448_CLIENT_SECRET,
+        );
+        assert_eq!(
+            keys.decrypt_record_resync(&aad, &ct, 0),
+            Err(DecryptError::AeadAuthFailed)
         );
     }
 

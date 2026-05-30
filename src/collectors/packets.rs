@@ -59,6 +59,11 @@ pub struct CapturedPacket {
     /// only becomes available once the ClientHello has been
     /// reassembled across multiple QUIC Initials.
     pub app_protocol: Option<crate::dpi::AppProtocol>,
+    /// Inner plaintext when this packet carried a TLS 1.3 Application
+    /// Data record AND the stream's secrets were known at the time
+    /// (configured `SSLKEYLOGFILE` + cooperating client). `None`
+    /// otherwise — non-TLS, non-decrypted, or pre-handshake records.
+    pub decrypted_plaintext: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +363,23 @@ pub struct Stream {
     /// "packets arrive out of order but no resends" (high OOO).
     pub out_of_order_a_to_b: u32,
     pub out_of_order_b_to_a: u32,
+    /// TLS 1.3 ClientHello random — captured when the first
+    /// handshake record on this stream is observed. Used to look
+    /// up secrets in the SSLKEYLOGFILE-backed `KeylogStore`.
+    pub tls_client_random: Option<[u8; 32]>,
+    /// Negotiated TLS 1.3 cipher suite (raw u16 from ServerHello).
+    /// The keylog provides AEAD secrets but not the chosen cipher,
+    /// so we read it off the wire.
+    pub tls_cipher_suite: Option<u16>,
+    /// Set once we've concluded this stream can *never* be decrypted —
+    /// the ClientHello was missed (no `client_random`) or the cipher
+    /// suite is outside our TLS 1.3 support set. A keylog miss does NOT
+    /// set this: the watcher ingests secrets asynchronously, so we keep
+    /// retrying derivation per record until the secret appears. Once
+    /// keys are derived they live in `StreamTracker.tls_keys` (their
+    /// `aead::LessSafeKey` isn't `Clone`, so they can't sit on the
+    /// otherwise-Clone `Stream`).
+    pub tls_decrypt_disabled: bool,
 }
 
 /// Boundary between "out-of-order" (small reorder window) and "retransmit"
@@ -374,6 +396,40 @@ pub struct StreamTracker {
     /// references resolve to None rather than aliasing a different flow.
     pub all_streams: HashMap<u32, Stream>,
     next_index: u32,
+    /// Per-stream TLS 1.3 decryption state, keyed by stream index. Lives
+    /// outside `Stream` because `aead::LessSafeKey` isn't `Clone`, and
+    /// `Stream` needs to stay Clone for the public `get_stream` API.
+    /// `None` for non-TLS streams or those where SSLKEYLOGFILE didn't
+    /// yield matching secrets.
+    pub tls_keys: HashMap<u32, TlsStreamKeys>,
+    /// Shared keylog index (SSLKEYLOGFILE-backed). Empty / placeholder
+    /// when decryption isn't configured. Wrapped in `Arc` so the
+    /// background watcher thread and the capture loop share one map.
+    pub keylog: std::sync::Arc<crate::dpi::tls_decrypt::KeylogStore>,
+}
+
+/// Per-stream AEAD state for TLS 1.3 application data. Held in
+/// `StreamTracker.tls_keys` rather than on `Stream` because the
+/// underlying `aead::LessSafeKey` isn't `Clone`.
+pub struct TlsStreamKeys {
+    pub client: crate::dpi::tls_decrypt::DirectionKeys,
+    pub server: crate::dpi::tls_decrypt::DirectionKeys,
+}
+
+/// How many record sequence numbers `try_decrypt_tls_record` will search
+/// forward when an expected decrypt fails. Lets a stream recover the
+/// correct sequence after secrets arrived late (the keylog watcher race)
+/// or after a record we couldn't reassemble, while bounding the wasted
+/// AEAD attempts on handshake-secret records (which never authenticate
+/// under the application keys).
+const TLS_RESYNC_WINDOW: u64 = 16;
+
+/// First 4 bytes of a `client_random` rendered as 8 hex chars.
+/// Used to correlate trace-log lines between the keylog watcher
+/// (which sees secrets indexed by client_random) and the capture
+/// loop (which sees client_randoms on the wire).
+fn hex_prefix(cr: &[u8; 32]) -> String {
+    format!("{:02x}{:02x}{:02x}{:02x}", cr[0], cr[1], cr[2], cr[3])
 }
 
 impl Default for StreamTracker {
@@ -388,6 +444,8 @@ impl StreamTracker {
             streams: HashMap::new(),
             all_streams: HashMap::new(),
             next_index: 0,
+            tls_keys: HashMap::new(),
+            keylog: crate::dpi::tls_decrypt::KeylogStore::new(),
         }
     }
 
@@ -456,6 +514,9 @@ impl StreamTracker {
                     retransmits_b_to_a: 0,
                     out_of_order_a_to_b: 0,
                     out_of_order_b_to_a: 0,
+                    tls_client_random: None,
+                    tls_cipher_suite: None,
+                    tls_decrypt_disabled: false,
                 },
             );
             self.evict_if_needed();
@@ -607,6 +668,39 @@ impl StreamTracker {
             };
         }
 
+        // TLS 1.3 decryption: opportunistically capture client_random
+        // from any ClientHello we see, and cipher_suite from any
+        // ServerHello. Both are plaintext on TLS 1.3 (handshakes start
+        // unencrypted). Both can land on the same flow but on
+        // different packets, so we check on every payload until both
+        // are populated.
+        if is_tcp && !payload.is_empty() && payload[0] == 0x16 {
+            if stream.tls_client_random.is_none() {
+                let extracted = crate::dpi::tls::extract_client_random(payload);
+                if let Some(cr) = extracted {
+                    tracing::trace!(
+                        target: "netwatch::dpi::tls_decrypt",
+                        stream_index = stream_index,
+                        cr_prefix = %format!("{:02x}{:02x}{:02x}{:02x}", cr[0], cr[1], cr[2], cr[3]),
+                        "captured client_random from ClientHello"
+                    );
+                }
+                stream.tls_client_random = extracted;
+            }
+            if stream.tls_cipher_suite.is_none() {
+                let extracted = crate::dpi::tls::extract_server_hello_cipher_suite(payload);
+                if let Some(cs) = extracted {
+                    tracing::trace!(
+                        target: "netwatch::dpi::tls_decrypt",
+                        stream_index = stream_index,
+                        cipher_suite = %format!("0x{:04x}", cs),
+                        "captured cipher_suite from ServerHello"
+                    );
+                }
+                stream.tls_cipher_suite = extracted;
+            }
+        }
+
         // Cross-packet QUIC CRYPTO reassembly. Runs while we still
         // haven't extracted a hostname for this stream.
         if !is_tcp
@@ -682,6 +776,124 @@ impl StreamTracker {
 
     pub fn get_stream(&self, index: u32) -> Option<&Stream> {
         self.all_streams.get(&index)
+    }
+
+    /// Attempt to decrypt a TLS 1.3 Application Data record carried by
+    /// `payload` (the raw TCP segment payload). Returns the inner
+    /// plaintext if all of:
+    /// - `payload` starts with a TLS Application Data record header
+    ///   (`type=0x17`, `version=0x03??`, with the full record present)
+    /// - The stream's `client_random` and `cipher_suite` have been
+    ///   observed (ClientHello + ServerHello already processed)
+    /// - The configured SSLKEYLOGFILE has matching application-traffic
+    ///   secrets for this `client_random`
+    ///
+    /// Derives per-direction AEAD keys lazily once the keylog yields
+    /// this connection's secrets, then stores them in `tls_keys` for
+    /// subsequent records on the same flow. Returns `None` (not an
+    /// error) for any non-matching input — non-TLS traffic,
+    /// pre-handshake records, missing keys, etc.
+    ///
+    /// ## Retry vs. give-up
+    ///
+    /// A keylog *miss* is **retryable**, not fatal: the background
+    /// watcher polls the SSLKEYLOGFILE asynchronously, so the first few
+    /// application-data records on a flow routinely arrive before the
+    /// secret has been ingested. We therefore re-attempt key derivation
+    /// on every record until it succeeds, and use
+    /// [`DirectionKeys::decrypt_record_resync`] so a stream whose
+    /// secrets landed late still locks onto the correct record sequence
+    /// and decrypts the remainder. We permanently disable a stream
+    /// (`tls_decrypt_disabled`) only for conditions that can never
+    /// recover: a missing `client_random` (we joined mid-connection and
+    /// never saw the ClientHello) or a cipher suite outside our TLS 1.3
+    /// support set.
+    pub fn try_decrypt_tls_record(
+        &mut self,
+        stream_index: u32,
+        payload: &[u8],
+        client_to_server: bool,
+    ) -> Option<Vec<u8>> {
+        // Sanity: TLS Application Data record header is 5 bytes.
+        if payload.len() < 5 || payload[0] != 0x17 || payload[1] != 0x03 {
+            return None;
+        }
+        let length = u16::from_be_bytes([payload[3], payload[4]]) as usize;
+        if payload.len() < 5 + length {
+            // Record spans multiple TCP segments — Phase 1 does not
+            // handle cross-segment reassembly. `decrypt_record_resync`
+            // lets a later record re-sync the sequence after this gap.
+            return None;
+        }
+        let aad = &payload[..5];
+        let ciphertext_src = &payload[5..5 + length];
+
+        // Lazy-derive AEAD keys once the keylog has this flow's secrets.
+        if !self.tls_keys.contains_key(&stream_index) {
+            // First, pull the handshake-derived inputs off the stream and
+            // latch off streams that can never be decrypted.
+            let (cr, suite) = {
+                let stream = self.all_streams.get_mut(&stream_index)?;
+                if stream.tls_decrypt_disabled {
+                    return None;
+                }
+                let Some(cr) = stream.tls_client_random else {
+                    // Application data but no ClientHello was ever seen —
+                    // capture started mid-connection. Unrecoverable.
+                    stream.tls_decrypt_disabled = true;
+                    tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, "disable: no client_random (missed ClientHello)");
+                    return None;
+                };
+                let Some(cs_raw) = stream.tls_cipher_suite else {
+                    // ServerHello not parsed yet — retry on a later record.
+                    tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, cr_prefix=%hex_prefix(&cr), "retry: cipher_suite not observed yet");
+                    return None;
+                };
+                let Some(suite) = crate::dpi::tls_decrypt::CipherSuite::from_wire(cs_raw) else {
+                    stream.tls_decrypt_disabled = true;
+                    tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, cs=%format!("0x{:04x}", cs_raw), "disable: cipher_suite not in TLS 1.3 support list");
+                    return None;
+                };
+                (cr, suite)
+            };
+
+            // A keylog miss (or a half-written entry) is retryable — the
+            // watcher may not have ingested the secret yet. Do NOT latch.
+            let secrets = self.keylog.lookup(&cr)?;
+            let (Some(client_app), Some(server_app)) =
+                (secrets.client_application, secrets.server_application)
+            else {
+                tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, cr_prefix=%hex_prefix(&cr), "retry: keylog hit but app-traffic secrets incomplete");
+                return None;
+            };
+            let client =
+                crate::dpi::tls_decrypt::DirectionKeys::from_traffic_secret(suite, &client_app);
+            let server =
+                crate::dpi::tls_decrypt::DirectionKeys::from_traffic_secret(suite, &server_app);
+            tracing::debug!(target: "netwatch::dpi::tls_decrypt", stream_index, cr_prefix=%hex_prefix(&cr), "derived AEAD keys — decryption ready");
+            self.tls_keys
+                .insert(stream_index, TlsStreamKeys { client, server });
+        }
+
+        let keys = self.tls_keys.get_mut(&stream_index)?;
+        let dir = if client_to_server {
+            &mut keys.client
+        } else {
+            &mut keys.server
+        };
+        match dir.decrypt_record_resync(aad, ciphertext_src, TLS_RESYNC_WINDOW) {
+            Ok(inner) => {
+                tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, client_to_server, plain_len=inner.content.len(), inner_type=inner.content_type, "decrypted record");
+                Some(inner.content)
+            }
+            Err(e) => {
+                // Expected for handshake-secret records carried with outer
+                // type 0x17 (EncryptedExtensions, Certificate, Finished),
+                // which won't authenticate under the application keys.
+                tracing::trace!(target: "netwatch::dpi::tls_decrypt", stream_index, client_to_server, error=?e, "decrypt miss (handshake record or sequence gap beyond window)");
+                None
+            }
+        }
     }
 
     /// DPI snapshot: classified L7 protocol per stream key. Only flows
@@ -800,6 +1012,10 @@ pub struct PacketCollector {
     pub stream_tracker: Arc<Mutex<StreamTracker>>,
     counter: Arc<Mutex<u64>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// Lives for the lifetime of the collector when a TLS keylog path
+    /// is configured. Dropping it signals the background polling
+    /// thread to stop and joins it.
+    tls_keylog_watcher: Option<crate::dpi::tls_decrypt::WatcherHandle>,
 }
 
 impl Default for PacketCollector {
@@ -818,7 +1034,30 @@ impl PacketCollector {
             stream_tracker: Arc::new(Mutex::new(StreamTracker::new())),
             counter: Arc::new(Mutex::new(0)),
             handle: None,
+            tls_keylog_watcher: None,
         }
+    }
+
+    /// Start polling the configured SSLKEYLOGFILE for TLS 1.3 secrets.
+    /// Idempotent — calling again with a new path replaces the watcher.
+    /// Empty path / None drops any existing watcher (stops decryption).
+    pub fn configure_tls_keylog(&mut self, path: Option<std::path::PathBuf>) {
+        // Dropping the existing handle signals the prior thread to stop
+        // before we spawn a new one.
+        self.tls_keylog_watcher = None;
+        let Some(p) = path else { return };
+        // Share the StreamTracker's KeylogStore with the watcher so the
+        // capture loop sees ingested secrets immediately.
+        let store = {
+            let t = self.stream_tracker.lock().unwrap();
+            std::sync::Arc::clone(&t.keylog)
+        };
+        tracing::info!(
+            target: "netwatch::dpi::tls_decrypt",
+            path = %p.display(),
+            "starting TLS keylog watcher"
+        );
+        self.tls_keylog_watcher = Some(crate::dpi::tls_decrypt::spawn_keylog_watcher(p, store));
     }
 
     pub fn start_capture(&mut self, interface: &str, bpf_filter: Option<&str>) {
@@ -897,7 +1136,7 @@ impl PacketCollector {
                                     StreamProtocol::Udp
                                 };
                                 let payload = extract_app_payload(packet.data, proto);
-                                let (idx, app_proto) = {
+                                let (idx, app_proto, decrypted) = {
                                     let mut t = tracker.lock().unwrap();
                                     let i = t.track_packet(
                                         &parsed.src_ip,
@@ -913,10 +1152,23 @@ impl PacketCollector {
                                         parsed.timestamp_ns,
                                     );
                                     let ap = t.get_stream(i).and_then(|s| s.app_protocol.clone());
-                                    (i, ap)
+                                    // TLS-decrypt the application-data record carried by
+                                    // *this* TCP segment, if we have keys for the flow.
+                                    // Determines direction from initiator info on the stream.
+                                    let client_to_server = t
+                                        .get_stream(i)
+                                        .and_then(|s| s.initiator.as_ref())
+                                        .map(|(ip, port)| {
+                                            ip.as_str() == parsed.src_ip.as_str() && *port == sp
+                                        })
+                                        .unwrap_or(true);
+                                    let dec =
+                                        t.try_decrypt_tls_record(i, &payload, client_to_server);
+                                    (i, ap, dec)
                                 };
                                 parsed.stream_index = Some(idx);
                                 parsed.app_protocol = app_proto;
+                                parsed.decrypted_plaintext = decrypted;
                             }
                             batch.push(parsed);
                             if batch.len() >= CAPTURE_BATCH_SIZE {
@@ -2248,6 +2500,7 @@ fn build_packet(
         expert,
         timestamp_ns,
         app_protocol: None,
+        decrypted_plaintext: None,
     }
 }
 
@@ -2633,6 +2886,12 @@ pub enum FilterExpr {
     /// panel" to "show me every other connection with the same JA4"
     /// — the core threat-hunting move JA4 enables.
     Ja4(String),
+    /// `decrypted:true` / `decrypted:false` — matches whether netwatch
+    /// recovered TLS 1.3 application-data plaintext for this packet
+    /// (configured SSLKEYLOGFILE + cooperating client). `true` is the
+    /// quickest way to see exactly what decryption produced without
+    /// scrolling past undecryptable QUIC/TLS-1.2/keyless flows.
+    Decrypted(bool),
     Not(Box<FilterExpr>),
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
@@ -2815,6 +3074,16 @@ fn parse_atom(tokens: &[String]) -> Option<(FilterExpr, &[String])> {
         };
         return Some((FilterExpr::Ech(want), &tokens[1..]));
     }
+    if let Some(val) = word.strip_prefix("decrypted:") {
+        let want = match val.trim_matches('"').to_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            // Binary flag, no aliases — reject typos rather than silently
+            // degrading to a bare-word match (mirrors `ech:`).
+            _ => return None,
+        };
+        return Some((FilterExpr::Decrypted(want), &tokens[1..]));
+    }
     if let Some(val) = word.strip_prefix("ja4:") {
         return Some((
             FilterExpr::Ja4(val.trim_matches('"').to_lowercase()),
@@ -2863,6 +3132,11 @@ pub fn matches_packet(expr: &FilterExpr, pkt: &CapturedPacket) -> bool {
                     .dst_host
                     .as_ref()
                     .is_some_and(|h| h.to_lowercase().contains(s))
+                // Also search recovered TLS plaintext so `contains "GET /"`
+                // finds decrypted requests/responses, not just cleartext.
+                || pkt.decrypted_plaintext.as_ref().is_some_and(|pt| {
+                    String::from_utf8_lossy(pt).to_lowercase().contains(s)
+                })
         }
         FilterExpr::AppProto(tag) => match &pkt.app_protocol {
             Some(crate::dpi::AppProtocol::Tls { .. }) => "tls" == tag.as_str(),
@@ -2909,6 +3183,7 @@ pub fn matches_packet(expr: &FilterExpr, pkt: &CapturedPacket) -> bool {
             }
             _ => false,
         },
+        FilterExpr::Decrypted(want) => pkt.decrypted_plaintext.is_some() == *want,
         FilterExpr::Not(inner) => !matches_packet(inner, pkt),
         FilterExpr::And(a, b) => matches_packet(a, pkt) && matches_packet(b, pkt),
         FilterExpr::Or(a, b) => matches_packet(a, pkt) || matches_packet(b, pkt),
@@ -2988,6 +3263,7 @@ mod tests {
             expert: ExpertSeverity::Chat,
             timestamp_ns: 0,
             app_protocol: None,
+            decrypted_plaintext: None,
         }
     }
 
@@ -3430,6 +3706,55 @@ mod tests {
         // whose outer SNI mentions cloudflare. Tests parser glue.
         let f = parse_filter("ech:true and sni:cloudflare").unwrap();
         assert!(matches!(f, FilterExpr::And(_, _)));
+    }
+
+    #[test]
+    fn test_filter_decrypted_parses() {
+        assert!(matches!(
+            parse_filter("decrypted:true").unwrap(),
+            FilterExpr::Decrypted(true)
+        ));
+        assert!(matches!(
+            parse_filter("decrypted:false").unwrap(),
+            FilterExpr::Decrypted(false)
+        ));
+        // Typos must fail the parse, not silently match nothing.
+        assert!(parse_filter("decrypted:yes").is_none());
+    }
+
+    #[test]
+    fn test_matches_decrypted_true_only_on_decrypted_packets() {
+        let mut pkt = make_packet("TCP", "1.1.1.1", "2.2.2.2", Some(1234), Some(443), "");
+        // No plaintext yet → only decrypted:false matches.
+        assert!(!matches_packet(
+            &parse_filter("decrypted:true").unwrap(),
+            &pkt
+        ));
+        assert!(matches_packet(
+            &parse_filter("decrypted:false").unwrap(),
+            &pkt
+        ));
+
+        pkt.decrypted_plaintext = Some(b"GET / HTTP/1.1\r\n".to_vec());
+        assert!(matches_packet(
+            &parse_filter("decrypted:true").unwrap(),
+            &pkt
+        ));
+        assert!(!matches_packet(
+            &parse_filter("decrypted:false").unwrap(),
+            &pkt
+        ));
+    }
+
+    #[test]
+    fn test_contains_searches_decrypted_plaintext() {
+        let mut pkt = make_packet("TCP", "1.1.1.1", "2.2.2.2", Some(1234), Some(443), "");
+        pkt.decrypted_plaintext = Some(b"GET /secret HTTP/1.1\r\nHost: x\r\n".to_vec());
+        // The needle exists only in the decrypted body, not info/payload_text.
+        assert!(matches_packet(
+            &parse_filter("contains \"/secret\"").unwrap(),
+            &pkt
+        ));
     }
 
     #[test]

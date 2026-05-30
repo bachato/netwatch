@@ -682,6 +682,7 @@ mod tests {
             expert,
             timestamp_ns: 1,
             app_protocol: None,
+            decrypted_plaintext: None,
         }
     }
 

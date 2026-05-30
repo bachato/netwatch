@@ -531,6 +531,7 @@ mod tests {
             expert,
             timestamp_ns: 0,
             app_protocol: None,
+            decrypted_plaintext: None,
         }
     }
 

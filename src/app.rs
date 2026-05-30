@@ -521,6 +521,15 @@ impl App {
         network_intel.set_bandwidth_threshold(user_config.alerts.bandwidth_threshold);
 
         let mut packet_collector = PacketCollector::new();
+        // Wire the TLS keylog watcher BEFORE starting capture so the
+        // store is hooked up when the first TLS handshakes arrive.
+        // Empty path = decryption disabled; non-empty = spawn a poller
+        // that ingests secrets as the cooperating client process
+        // appends them.
+        if !user_config.tls_keylog_path.trim().is_empty() {
+            packet_collector
+                .configure_tls_keylog(Some(std::path::PathBuf::from(&user_config.tls_keylog_path)));
+        }
         // Start ambient packet capture so the Connections view can show
         // per-connection rates. If this fails (no sudo, no interface), the
         // error surfaces on the Packets tab and rate columns stay blank.
