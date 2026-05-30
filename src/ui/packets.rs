@@ -153,6 +153,16 @@ pub fn format_packet_for_clipboard(pkt: &CapturedPacket) -> String {
             let _ = writeln!(s, "  ECH: present (inner SNI hidden from observer)");
         }
     }
+    // Full TLS-decrypted application data — untruncated, unlike the
+    // on-screen preview, so `y` is the way to grab the complete payload.
+    if let Some(pt) = &pkt.decrypted_plaintext {
+        s.push('\n');
+        let _ = writeln!(s, "  ── TLS decrypted ({} bytes) ──", pt.len());
+        s.push_str(&preview_decrypted_bytes(pt, pt.len()));
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+    }
     s
 }
 
@@ -193,6 +203,51 @@ fn app_protocol_summary(p: &crate::dpi::AppProtocol) -> String {
         } => format!("SSDP {method} {t}"),
         Ssdp { method, .. } => format!("SSDP {method}"),
         Ftp { command } => format!("FTP {command}"),
+    }
+}
+
+/// Render decrypted TLS plaintext for the details panel. If the bytes
+/// are valid UTF-8 we show them as-is (usually HTTP/2 framing — still
+/// readable enough to see methods/paths/headers). Otherwise hex-dump
+/// the first `max_bytes` so the user can at least eyeball binary
+/// payloads. Truncated with an ellipsis when over `max_bytes`.
+fn preview_decrypted_bytes(bytes: &[u8], max_bytes: usize) -> String {
+    let trimmed = if bytes.len() > max_bytes {
+        &bytes[..max_bytes]
+    } else {
+        bytes
+    };
+    match std::str::from_utf8(trimmed) {
+        Ok(s) => {
+            let mut out = s.replace(|c: char| c.is_control() && c != '\n', "·");
+            if bytes.len() > max_bytes {
+                out.push('…');
+            }
+            out
+        }
+        Err(_) => {
+            // Hex dump, 16 bytes per line, ASCII gutter.
+            let mut out = String::with_capacity(trimmed.len() * 4);
+            for chunk in trimmed.chunks(16) {
+                use std::fmt::Write;
+                for b in chunk {
+                    let _ = write!(out, "{:02x} ", b);
+                }
+                out.push_str("  ");
+                for b in chunk {
+                    out.push(if b.is_ascii_graphic() || *b == b' ' {
+                        *b as char
+                    } else {
+                        '.'
+                    });
+                }
+                out.push('\n');
+            }
+            if bytes.len() > max_bytes {
+                out.push('…');
+            }
+            out
+        }
     }
 }
 
@@ -263,8 +318,17 @@ fn render_packet_list(f: &mut Frame, app: &App, packets: &[CapturedPacket], area
         .map(|(row_idx, pkt)| {
             let proto_style = protocol_color(&pkt.protocol, &app.theme);
             let selected = app.ui.scroll.packet_selected == Some(pkt.id);
+            // Distinguish packets where netwatch successfully decrypted the
+            // TLS application data — operators scanning a long list want to
+            // see "I have plaintext for this one" without selecting every
+            // row. Uses `status_good` (theme-aware green) so it works across
+            // light/dark themes, and falls back to selection bg when the row
+            // is the cursor.
+            let decrypted = pkt.decrypted_plaintext.is_some();
             let row_style = if selected {
                 Style::default().bg(app.theme.selection_bg)
+            } else if decrypted {
+                Style::default().fg(app.theme.status_good).bold()
             } else {
                 expert_row_style(pkt.expert, &app.theme)
             };
@@ -524,7 +588,7 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
 
     match selected_pkt {
         Some(pkt) => {
-            let has_payload = !pkt.payload_text.is_empty();
+            let has_payload = !pkt.payload_text.is_empty() || pkt.decrypted_plaintext.is_some();
 
             // Geo info lines (if enabled)
             let mut geo_lines: Vec<Line> = Vec::new();
@@ -649,6 +713,48 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
                 }
             }
 
+            // TLS-decrypted application data (when SSLKEYLOGFILE
+            // matched this flow). Shows a readable text preview if the
+            // plaintext looks like UTF-8, falling back to a hex dump.
+            // The inline view is capped (more in the `d`-expanded view);
+            // `y` copies the FULL payload to the clipboard.
+            if let Some(pt) = &pkt.decrypted_plaintext {
+                detail_lines.push(Line::from(Span::styled(
+                    "  ── TLS decrypted ──",
+                    Style::default().fg(app.theme.status_good).bold(),
+                )));
+                detail_lines.push(Line::from(Span::styled(
+                    format!("  {} bytes plaintext", pt.len()),
+                    Style::default().fg(app.theme.status_good),
+                )));
+                // Expanded mode (`d`) gets the whole pane, so show a lot;
+                // the compact pane shares space with hex/ascii, so cap low.
+                let max_lines = if app.ui.packet_detail_expanded {
+                    500
+                } else {
+                    16
+                };
+                let byte_cap = if app.ui.packet_detail_expanded {
+                    65536
+                } else {
+                    2048
+                };
+                let preview = preview_decrypted_bytes(pt, byte_cap);
+                let preview_lines: Vec<&str> = preview.lines().collect();
+                for line in preview_lines.iter().take(max_lines) {
+                    detail_lines.push(Line::from(Span::styled(
+                        format!("  {line}"),
+                        Style::default().fg(app.theme.text_primary),
+                    )));
+                }
+                if preview_lines.len() > max_lines || pt.len() > byte_cap {
+                    detail_lines.push(Line::from(Span::styled(
+                        "  … (press d to expand · y to copy full payload)",
+                        Style::default().fg(app.theme.text_muted).italic(),
+                    )));
+                }
+            }
+
             // QUIC frame breakdown — for UDP packets that look like a
             // v1/v2 Initial, decrypt and surface CRYPTO / PADDING /
             // PING frames as a quick decode of what's inside.
@@ -702,17 +808,20 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
             // implementation sized from `pkt.details.len()` only, so
             // the appended lines (JA4, ECH) were rendered into the
             // Paragraph but immediately clipped off the bottom.
-            let detail_height = (detail_lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            // In expanded mode (`d` toggle) give the protocol detail
-            // the whole pane and skip the payload / hex / ASCII
-            // sub-sections — the user explicitly asked for an
-            // uncluttered "just protocol" view.
-            let rows = if app.ui.packet_detail_expanded {
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(0)])
-                    .split(area)
-            } else if has_payload {
+            // Cap the Protocol Detail box so the Payload / Hex / ASCII
+            // sub-dialogs below it stay on screen. Compact view caps at
+            // `area - 4`; the expanded (`d`) 3/4 view has a large pane, so
+            // bound the detail box to ~60% and keep showing the same
+            // sub-dialogs as the main view. The decrypted payload lives in
+            // the detail box, but the user still wants the other panes
+            // visible alongside it rather than a protocol-only view.
+            let detail_cap = if app.ui.packet_detail_expanded {
+                (area.height * 3 / 5).max(5)
+            } else {
+                area.height.saturating_sub(4)
+            };
+            let detail_height = (detail_lines.len() as u16 + 2).min(detail_cap);
+            let rows = if has_payload {
                 Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -739,22 +848,31 @@ fn render_detail(f: &mut Frame, app: &App, packets: &[CapturedPacket], area: Rec
             );
             f.render_widget(proto_detail, rows[0]);
 
-            // Expanded mode: only the protocol detail; skip the
-            // payload / hex / ASCII sub-sections entirely. `rows` has
-            // only one element in this mode so the indexing below
-            // would panic without the guard.
-            if app.ui.packet_detail_expanded {
-                return;
-            }
-
             if has_payload {
-                // Payload content (readable text)
-                let payload = Paragraph::new(pkt.payload_text.clone())
-                    .style(Style::default().fg(app.theme.text_primary))
+                // Payload content. For a TLS flow the on-wire payload is
+                // ciphertext (so `payload_text` is just "[N bytes binary
+                // data]"); when we decrypted it, show the actual plaintext
+                // here instead and label the pane accordingly.
+                let (payload_body, payload_title, payload_style) =
+                    if let Some(pt) = &pkt.decrypted_plaintext {
+                        (
+                            preview_decrypted_bytes(pt, 16384),
+                            " Payload Content (TLS decrypted) ",
+                            Style::default().fg(app.theme.status_good),
+                        )
+                    } else {
+                        (
+                            pkt.payload_text.clone(),
+                            " Payload Content ",
+                            Style::default().fg(app.theme.text_primary),
+                        )
+                    };
+                let payload = Paragraph::new(payload_body)
+                    .style(payload_style)
                     .block(
                         Block::default()
                             .title(Line::from(Span::styled(
-                                " Payload Content ",
+                                payload_title,
                                 Style::default().fg(app.theme.brand).bold(),
                             )))
                             .borders(Borders::ALL)
@@ -1219,5 +1337,68 @@ fn expert_row_style(severity: ExpertSeverity, theme: &crate::theme::Theme) -> St
         ExpertSeverity::Error => Style::default().fg(theme.status_error),
         ExpertSeverity::Warn => Style::default().fg(theme.status_warn),
         _ => Style::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collectors::packets::{CapturedPacket, ExpertSeverity};
+
+    fn pkt_with_decrypted(pt: Option<Vec<u8>>) -> CapturedPacket {
+        CapturedPacket {
+            id: 1,
+            timestamp: "00:00:00.000".into(),
+            src_ip: "1.1.1.1".into(),
+            dst_ip: "2.2.2.2".into(),
+            src_host: None,
+            dst_host: None,
+            protocol: "TCP".into(),
+            length: 100,
+            src_port: Some(12345),
+            dst_port: Some(443),
+            info: String::new(),
+            details: vec!["TCP: 12345 -> 443".into()],
+            payload_text: String::new(),
+            raw_hex: String::new(),
+            raw_ascii: String::new(),
+            raw_bytes: vec![],
+            stream_index: Some(0),
+            tcp_flags: None,
+            tcp_seq: None,
+            expert: ExpertSeverity::Chat,
+            timestamp_ns: 0,
+            app_protocol: None,
+            decrypted_plaintext: pt,
+        }
+    }
+
+    #[test]
+    fn clipboard_includes_full_decrypted_payload() {
+        // A payload longer than the on-screen cap must still appear in full
+        // on the clipboard — `y` is the "see the whole thing" affordance.
+        let mut body = b"GET /verify HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        body.extend(std::iter::repeat(b'Z').take(4000));
+        let out = format_packet_for_clipboard(&pkt_with_decrypted(Some(body.clone())));
+        assert!(out.contains("── TLS decrypted (4043 bytes) ──"));
+        assert!(out.contains("GET /verify HTTP/1.1"));
+        assert!(out.contains("Host: example.com"));
+        assert_eq!(out.matches('Z').count(), 4000, "full payload, untruncated");
+    }
+
+    #[test]
+    fn clipboard_omits_section_without_decryption() {
+        let out = format_packet_for_clipboard(&pkt_with_decrypted(None));
+        assert!(!out.contains("TLS decrypted"));
+    }
+
+    #[test]
+    fn preview_decrypted_full_is_untruncated_but_capped_truncates() {
+        let bytes = vec![b'A'; 5000];
+        let full = preview_decrypted_bytes(&bytes, bytes.len());
+        assert!(!full.ends_with('…'));
+        assert_eq!(full.len(), 5000);
+        let capped = preview_decrypted_bytes(&bytes, 100);
+        assert!(capped.ends_with('…'));
     }
 }
