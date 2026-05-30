@@ -226,6 +226,26 @@ impl TcpHandshake {
     }
 }
 
+/// Per-flow QUIC 1-RTT decryption state. The cipher suite and the
+/// Destination-CID length aren't on the wire for short headers, so we
+/// brute-force them once (AEAD auth is the oracle) and cache the result;
+/// `largest_pn` per direction drives truncated packet-number reconstruction.
+#[derive(Debug, Clone, Default)]
+pub struct QuicDecryptState {
+    /// Negotiated suite, discovered by trial. `None` until first success.
+    pub suite: Option<crate::dpi::tls_decrypt::CipherSuite>,
+    /// DCID length for client→server / server→client short headers
+    /// (can differ per direction). `None` until discovered.
+    pub dcid_len_c2s: Option<u8>,
+    pub dcid_len_s2c: Option<u8>,
+    pub largest_pn_c2s: u64,
+    pub largest_pn_s2c: u64,
+    /// Set once we've concluded this flow can't be decrypted (no
+    /// ClientHello, or a full suite×dcid search failed with the secret
+    /// present — e.g. unsupported QUIC v2 1-RTT).
+    pub disabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Stream {
     #[allow(dead_code)]
@@ -255,6 +275,9 @@ pub struct Stream {
     /// 1-RTT secrets (QUIC 1-RTT decryption, Phase 2). `None` until the
     /// ClientHello is reassembled, and for non-QUIC flows.
     pub quic_client_random: Option<[u8; 32]>,
+    /// QUIC 1-RTT decryption state (cipher suite, per-direction DCID length
+    /// and largest packet number) discovered/tracked across the flow.
+    pub quic_decrypt: QuicDecryptState,
     /// Monotonic ns timestamp of the last packet seen on this flow. Drives LRU
     /// eviction when the tracker exceeds MAX_STREAMS.
     last_seen_ns: u64,
@@ -426,6 +449,7 @@ impl StreamTracker {
                     app_protocol_attempted: false,
                     quic_crypto_buf: Vec::new(),
                     quic_client_random: None,
+                    quic_decrypt: QuicDecryptState::default(),
                     highest_seq_a_to_b: None,
                     highest_seq_b_to_a: None,
                     retransmits_a_to_b: 0,
@@ -827,6 +851,101 @@ impl StreamTracker {
         }
     }
 
+    /// Attempt to decrypt a QUIC 1-RTT (short-header) packet in this UDP
+    /// datagram. Succeeds when the flow's ClientHello was seen (so we have a
+    /// `client_random`), the keylog holds its `*_TRAFFIC_SECRET_0`, and some
+    /// (cipher suite, DCID length) combination authenticates. Suite + DCID
+    /// length aren't on the wire for short headers, so the first packet
+    /// brute-forces them (AEAD auth is the oracle) and caches the result;
+    /// `largest_pn` is tracked per direction for pn reconstruction. Assumes
+    /// QUIC v1 (v2 1-RTT and coalesced packets are not yet handled).
+    pub fn try_decrypt_quic_1rtt(
+        &mut self,
+        stream_index: u32,
+        payload: &[u8],
+        client_to_server: bool,
+    ) -> Option<Vec<u8>> {
+        // Short header: fixed bit (0x40) set, long-header bit (0x80) clear.
+        if payload.first().map(|b| b & 0xc0) != Some(0x40) {
+            return None;
+        }
+        // Pull inputs without holding a borrow across the keylog lookup.
+        let (cr, suite_cached, dcid_cached, largest_pn) = {
+            let s = self.all_streams.get(&stream_index)?;
+            if s.quic_decrypt.disabled {
+                return None;
+            }
+            let cr = s.quic_client_random?;
+            let dcid = if client_to_server {
+                s.quic_decrypt.dcid_len_c2s
+            } else {
+                s.quic_decrypt.dcid_len_s2c
+            };
+            let lpn = if client_to_server {
+                s.quic_decrypt.largest_pn_c2s
+            } else {
+                s.quic_decrypt.largest_pn_s2c
+            };
+            (cr, s.quic_decrypt.suite, dcid, lpn)
+        };
+        // Keylog miss is retryable (watcher may not have ingested yet) — do
+        // not disable on it.
+        let secrets = self.keylog.lookup(&cr)?;
+        let secret = if client_to_server {
+            secrets.client_application
+        } else {
+            secrets.server_application
+        }?;
+
+        use crate::dpi::tls_decrypt::CipherSuite;
+        let suites: Vec<CipherSuite> = match suite_cached {
+            Some(su) => vec![su],
+            None => vec![
+                CipherSuite::Aes128GcmSha256,
+                CipherSuite::Aes256GcmSha384,
+                CipherSuite::Chacha20Poly1305Sha256,
+            ],
+        };
+        let dcid_lens: Vec<usize> = match dcid_cached {
+            Some(d) => vec![d as usize],
+            None => (0..=20usize).collect(),
+        };
+
+        for &suite in &suites {
+            for &dcid_len in &dcid_lens {
+                if let Ok((pn, plain)) = crate::dpi::quic::decrypt_1rtt_packet(
+                    payload,
+                    dcid_len,
+                    &secret,
+                    suite,
+                    crate::dpi::quic::QuicVersion::V1,
+                    largest_pn,
+                ) {
+                    if let Some(s) = self.all_streams.get_mut(&stream_index) {
+                        s.quic_decrypt.suite = Some(suite);
+                        if client_to_server {
+                            s.quic_decrypt.dcid_len_c2s = Some(dcid_len as u8);
+                            s.quic_decrypt.largest_pn_c2s = s.quic_decrypt.largest_pn_c2s.max(pn);
+                        } else {
+                            s.quic_decrypt.dcid_len_s2c = Some(dcid_len as u8);
+                            s.quic_decrypt.largest_pn_s2c = s.quic_decrypt.largest_pn_s2c.max(pn);
+                        }
+                    }
+                    tracing::trace!(target: "netwatch::dpi::quic", stream_index, client_to_server, dcid_len, pn, plain_len = plain.len(), "decrypted QUIC 1-RTT packet");
+                    return Some(plain);
+                }
+            }
+        }
+        // Secret present + ClientHello seen, but nothing authenticated across
+        // the full suite×DCID search — likely QUIC v2 1-RTT (unsupported) or a
+        // coalesced/odd packet. Give up to bound per-packet cost.
+        if let Some(s) = self.all_streams.get_mut(&stream_index) {
+            s.quic_decrypt.disabled = true;
+        }
+        tracing::trace!(target: "netwatch::dpi::quic", stream_index, "QUIC 1-RTT decrypt search failed; disabling flow");
+        None
+    }
+
     /// DPI snapshot: classified L7 protocol per stream key. Only flows
     /// where classification succeeded appear in the map. Cheap clone
     /// per tick; the per-connection joiner looks up by `StreamKey`.
@@ -1057,8 +1176,21 @@ impl PacketCollector {
                                             ip.as_str() == parsed.src_ip.as_str() && *port == sp
                                         })
                                         .unwrap_or(true);
-                                    let dec =
-                                        t.try_decrypt_tls_record(i, &payload, client_to_server);
+                                    let dec = t
+                                        .try_decrypt_tls_record(i, &payload, client_to_server)
+                                        .or_else(|| {
+                                            // QUIC 1-RTT short-header packets ride UDP; the
+                                            // TLS path above no-ops on them.
+                                            if proto == StreamProtocol::Udp {
+                                                t.try_decrypt_quic_1rtt(
+                                                    i,
+                                                    &payload,
+                                                    client_to_server,
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        });
                                     (i, ap, dec)
                                 };
                                 parsed.stream_index = Some(idx);

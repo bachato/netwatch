@@ -292,9 +292,6 @@ fn derive_initial_keys(dcid: &[u8], version: QuicVersion) -> Result<InitialKeys,
 /// fixed salt), the secret here is the `*_TRAFFIC_SECRET_0` the cooperating
 /// client wrote to `SSLKEYLOGFILE`. `key`/`hp` are 16 bytes for AES-128-GCM,
 /// 32 for AES-256-GCM and ChaCha20-Poly1305.
-// Wired into the short-header decrypt path in Phase 2c; for now only the
-// derivation + its RFC 9001 §A.5 KAT exercise it.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct OneRttKeys {
     pub key: Vec<u8>,
@@ -306,7 +303,7 @@ pub(crate) struct OneRttKeys {
 /// QUIC HKDF labels (`"quic key"`/`"quic iv"`/`"quic hp"`, or the `quicv2`
 /// variants). The HKDF hash and key length come from the negotiated cipher
 /// suite. Validated against the RFC 9001 §A.5 ChaCha20 test vector.
-#[allow(clippy::result_unit_err, dead_code)] // wired in Phase 2c
+#[allow(clippy::result_unit_err)]
 pub(crate) fn derive_1rtt_keys(
     secret: &[u8],
     suite: crate::dpi::tls_decrypt::CipherSuite,
@@ -364,11 +361,11 @@ fn decode_packet_number(largest_pn: u64, truncated: u64, pn_len: usize) -> u64 {
 /// Destination Connection ID length — known from the handshake, *not* on the
 /// wire for short headers. `secret` is this direction's `*_TRAFFIC_SECRET_0`
 /// from the keylog; `largest_pn` is the largest pn already seen in this
-/// direction (for truncated-pn reconstruction). Returns the decrypted frame
-/// payload (QUIC frames), or `Err` if not a short header / auth fails.
+/// direction (for truncated-pn reconstruction). Returns `(packet_number,
+/// decrypted frame payload)`, or `Err` if not a short header / auth fails.
 ///
 /// Validated against the RFC 9001 §A.5 ChaCha20 short-header vector.
-#[allow(clippy::result_unit_err, dead_code)] // wired into the capture path in Phase 2c-ii
+#[allow(clippy::result_unit_err)]
 pub(crate) fn decrypt_1rtt_packet(
     packet: &[u8],
     dcid_len: usize,
@@ -376,7 +373,7 @@ pub(crate) fn decrypt_1rtt_packet(
     suite: crate::dpi::tls_decrypt::CipherSuite,
     version: QuicVersion,
     largest_pn: u64,
-) -> Result<Vec<u8>, ()> {
+) -> Result<(u64, Vec<u8>), ()> {
     // Short header: fixed bit 0x40 set, long-header bit 0x80 clear.
     if packet.is_empty() || packet[0] & 0x80 != 0 {
         return Err(());
@@ -427,7 +424,7 @@ pub(crate) fn decrypt_1rtt_packet(
         .open_in_place(nonce, aad, &mut ciphertext)
         .map_err(|_| ())?;
     ciphertext.truncate(ciphertext.len() - tag_len);
-    Ok(ciphertext)
+    Ok((pn, ciphertext))
 }
 
 /// Remove header protection on a full Initial packet. Mutates `buf` so
@@ -870,7 +867,7 @@ e221af44860018ab0856972e194cd934";
             hex_to_bytes("9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b");
         // largest_pn = 654360563 so reconstruction yields the example's
         // full pn 654360564 (= 0x2700bff4) from the 3-byte truncated 0x00bff4.
-        let plaintext = decrypt_1rtt_packet(
+        let (pn, plaintext) = decrypt_1rtt_packet(
             &packet,
             0, // empty Destination Connection ID
             &secret,
@@ -879,6 +876,7 @@ e221af44860018ab0856972e194cd934";
             654360563,
         )
         .expect("RFC 9001 A.5 packet must decrypt");
+        assert_eq!(pn, 654360564);
         assert_eq!(plaintext, hex_to_bytes("01"));
     }
 
