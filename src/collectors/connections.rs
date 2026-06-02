@@ -354,34 +354,28 @@ fn overlay_pktap_attribution(connections: &mut [Connection], pktap: &PktapAttrib
 }
 
 /// Overlay (pid, comm) from netwatch-sdk's `tcp_v4_connect` kprobe onto
-/// matching connections. Cache key is `(saddr, daddr, dport)` — sport is 0
-/// in SDK Phase 1 events, so we ignore it here too. Only IPv4 TCP rows are
-/// candidates; everything else is left untouched.
+/// matching connections. Cache key is `(daddr, dport)` — the kprobe can't
+/// read the socket's source addr/port at connect-entry. Only IPv4 TCP rows
+/// are candidates; everything else is left untouched.
 #[cfg(feature = "ebpf")]
 fn overlay_ebpf_attribution(
     connections: &mut [Connection],
     ebpf: &crate::ebpf::conn_tracker::EbpfAttributor,
 ) {
-    use std::net::Ipv4Addr;
-
     for conn in connections {
         if !conn.protocol.eq_ignore_ascii_case("tcp") {
             continue;
         }
-        let (Some(saddr), _) = parse_ipv4_endpoint(&conn.local_addr) else {
-            continue;
-        };
+        // Keyed on the destination only — the kprobe can't see the source at
+        // connect-entry (see conn_tracker::AttrKey).
         let (Some(daddr), Some(dport)) = parse_ipv4_endpoint(&conn.remote_addr) else {
             continue;
         };
-        if let Some(attr) = ebpf.lookup(saddr, daddr, dport) {
+        if let Some(attr) = ebpf.lookup(daddr, dport) {
             conn.pid = Some(attr.pid);
             conn.process_name = Some(attr.comm);
             conn.attribution = AttributionSource::Ebpf;
         }
-        // `Ipv4Addr` is unused if we early-return on every iter; this
-        // tiny use silences the import-unused warning when iter is empty.
-        let _ = Ipv4Addr::UNSPECIFIED;
     }
 }
 

@@ -8,9 +8,10 @@
 //!
 //! Phase 1 of the SDK's eBPF roadmap covers `tcp_v4_connect` only:
 //! - IPv4 TCP only (no IPv6, no UDP)
-//! - Source port is 0 in events (kernel field requires CO-RE — later
-//!   roadmap phase). We key the cache by (saddr, daddr, dport) and accept
-//!   that two concurrent connections from the same source to the same
+//! - The kprobe fires at connect-entry, where the destination (from the
+//!   `uaddr` arg) is valid but the socket's own source addr/port aren't yet
+//!   assigned. So `saddr`/`sport` are reported as 0 and we key the cache by
+//!   `(daddr, dport)`, accepting that two concurrent connections to the same
 //!   `daddr:dport` would alias. Rare in practice.
 //!
 //! Compiles on non-Linux targets when `--features ebpf` is set so
@@ -38,8 +39,12 @@ pub struct EbpfAttribution {
     pub seen_at: Instant,
 }
 
-/// `(saddr, daddr, dport)` — see module docstring on why sport is omitted.
-type AttrKey = (Ipv4Addr, Ipv4Addr, u16);
+/// `(daddr, dport)` — keyed on the destination only. The `tcp_v4_connect`
+/// kprobe fires at connect-entry, before the kernel assigns the socket's
+/// source address, so `saddr` is unavailable (reported as 0); `sport` was
+/// never captured either. Two local processes connecting to the same
+/// `daddr:dport` concurrently would alias — rare in practice.
+type AttrKey = (Ipv4Addr, u16);
 
 /// Shared cache of `AttrKey → EbpfAttribution`. Populated by the background
 /// drain thread, consulted by the connection collector.
@@ -53,8 +58,8 @@ impl EbpfAttributor {
         Arc::new(Self::default())
     }
 
-    pub fn lookup(&self, saddr: Ipv4Addr, daddr: Ipv4Addr, dport: u16) -> Option<EbpfAttribution> {
-        self.cache.lock().ok()?.get(&(saddr, daddr, dport)).cloned()
+    pub fn lookup(&self, daddr: Ipv4Addr, dport: u16) -> Option<EbpfAttribution> {
+        self.cache.lock().ok()?.get(&(daddr, dport)).cloned()
     }
 
     fn record(&self, key: AttrKey, attr: EbpfAttribution) {
@@ -134,14 +139,14 @@ impl Drop for ConnTracker {
 }
 
 fn record_connect(attributor: &Arc<EbpfAttributor>, evt: ConnectEvent) {
-    // Skip kernel-internal sockets and unreachable saddr=0.0.0.0 events
-    // that some kernels emit for sockets not yet bound. They can't be
-    // matched against any /proc connection.
-    if evt.saddr.is_unspecified() || evt.daddr.is_unspecified() || evt.dport == 0 {
+    // `saddr` is intentionally 0 — it isn't assigned until after connect-entry
+    // where the kprobe fires — so we key on the destination only. Skip events
+    // with no usable destination (kernel-internal sockets, etc.).
+    if evt.daddr.is_unspecified() || evt.dport == 0 {
         return;
     }
     attributor.record(
-        (evt.saddr, evt.daddr, evt.dport),
+        (evt.daddr, evt.dport),
         EbpfAttribution {
             pid: evt.pid,
             comm: evt.comm,
