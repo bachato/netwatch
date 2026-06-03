@@ -1096,9 +1096,17 @@ impl PacketCollector {
         self.handle = Some(thread::spawn(move || {
             // Try with promiscuous mode first, fall back to non-promiscuous
             // (some interfaces like loopback don't support promisc on macOS)
+            // `immediate_mode(true)` is load-bearing, not just a latency
+            // tweak: on Linux, libpcap ≥1.5 uses TPACKET_V3, whose block-retire
+            // timeout never fires when zero packets arrive — so on an idle
+            // interface `next_packet()` blocks forever and the capture loop
+            // never re-checks the `capturing` flag, which wedges `stop_capture()`
+            // on quit (issue #41). Immediate mode drops to per-packet delivery
+            // (TPACKET_V2), where the read timeout fires even with no traffic.
             let cap = pcap::Capture::from_device(iface.as_str())
                 .and_then(|c| {
                     c.promisc(true)
+                        .immediate_mode(true)
                         .snaplen(CAPTURE_SNAPLEN)
                         .timeout(CAPTURE_TIMEOUT_MS)
                         .open()
@@ -1106,6 +1114,7 @@ impl PacketCollector {
                 .or_else(|_| {
                     pcap::Capture::from_device(iface.as_str()).and_then(|c| {
                         c.promisc(false)
+                            .immediate_mode(true)
                             .snaplen(CAPTURE_SNAPLEN)
                             .timeout(CAPTURE_TIMEOUT_MS)
                             .open()
@@ -1239,7 +1248,19 @@ impl PacketCollector {
     pub fn stop_capture(&mut self) {
         self.capturing.store(false, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
-            let _ = h.join();
+            // Bounded join: the capture loop observes `capturing` at least
+            // every CAPTURE_TIMEOUT_MS, so it unwinds promptly under normal
+            // operation. Cap the wait anyway so a wedged pcap read can never
+            // freeze shutdown or an interface switch the way it did in
+            // issue #41 — if the thread hasn't finished by the deadline we
+            // detach it (the OS reaps it on process exit) rather than block.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(750);
+            while !h.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
     }
 
