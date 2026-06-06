@@ -17,11 +17,11 @@
 </p>
 
 <p align="center">
-  <img src="demo.gif" alt="NetWatch — Dashboard, Connections, Topology, Processes, Timeline" width="800">
+  <img src="demo-forensics.gif" alt="NetWatch decrypting a live TLS 1.3 session — the plaintext HTTP exchange decoded in the Packets tab" width="800">
 </p>
 
 <p align="center">
-  <em>Go from a 10,000-ft dashboard to <strong>decrypted TLS 1.3 bytes</strong> without leaving your terminal.</em>
+  <em>Read the plaintext out of a live <strong>TLS 1.3</strong> session — decrypted right in your terminal. No MITM, no proxy.</em>
 </p>
 
 ---
@@ -31,6 +31,14 @@ NetWatch is a real-time network **forensics** TUI. It **decrypts TLS 1.3**, fing
 **Who it's for:** blue-teamers, incident responders, and homelabbers who need live triage and evidence capture — not just a bandwidth meter.
 
 <samp>500+ tests · Landlock-sandboxed · safely parses hostile capture traffic</samp>
+
+<p align="center">
+  <img src="demo.gif" alt="NetWatch dashboard, connections, topology, processes, and timeline tabs" width="760">
+</p>
+
+<p align="center">
+  <em>…and a full live-traffic dashboard underneath: connections, topology, processes, timeline.</em>
+</p>
 
 ## What makes it different
 
