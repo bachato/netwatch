@@ -198,6 +198,11 @@ pub struct StreamSegment {
     pub timestamp: String,
     pub direction: StreamDirection,
     pub payload: Vec<u8>,
+    /// Decrypted inner plaintext for this segment's TLS/QUIC application-data
+    /// records, attached after decryption. `None` for raw (handshake, non-TLS,
+    /// or undecryptable) segments. Lets the stream view "follow" the decrypted
+    /// conversation instead of the encrypted wire bytes.
+    pub decrypted: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -723,6 +728,7 @@ impl StreamTracker {
                 timestamp: timestamp.to_string(),
                 direction,
                 payload: payload.to_vec(),
+                decrypted: None,
             });
         }
 
@@ -731,6 +737,28 @@ impl StreamTracker {
 
     pub fn get_stream(&self, index: u32) -> Option<&Stream> {
         self.all_streams.get(&index)
+    }
+
+    /// Attach decrypted plaintext to the stream segment for `packet_id` so the
+    /// stream view can render the decrypted conversation. Called right after a
+    /// successful decrypt, while the tracker lock is still held; the matching
+    /// segment is normally the most recent, so we search from the end.
+    pub fn attach_segment_decrypted(
+        &mut self,
+        stream_index: u32,
+        packet_id: u64,
+        plaintext: Vec<u8>,
+    ) {
+        if let Some(stream) = self.all_streams.get_mut(&stream_index) {
+            if let Some(seg) = stream
+                .segments
+                .iter_mut()
+                .rev()
+                .find(|s| s.packet_id == packet_id)
+            {
+                seg.decrypted = Some(plaintext);
+            }
+        }
     }
 
     /// Attempt to decrypt a TLS 1.3 Application Data record carried by
@@ -1210,6 +1238,12 @@ impl PacketCollector {
                                                 None
                                             }
                                         });
+                                    // Mirror the decrypted plaintext onto this
+                                    // packet's stream segment so the stream view
+                                    // can follow the decrypted conversation.
+                                    if let Some(ref pt) = dec {
+                                        t.attach_segment_decrypted(i, parsed.id, pt.clone());
+                                    }
                                     (i, ap, dec)
                                 };
                                 parsed.stream_index = Some(idx);

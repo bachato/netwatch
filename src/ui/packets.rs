@@ -1101,6 +1101,7 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "Text"
     };
+    let stream_has_decrypted = stream.segments.iter().any(|s| s.decrypted.is_some());
     let mut header_spans = vec![
         Span::styled(
             format!(" {proto_str} Stream #{stream_index} "),
@@ -1114,6 +1115,13 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.key_hint),
         ),
     ];
+    if stream_has_decrypted {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            "🔓 decrypted",
+            Style::default().fg(app.theme.status_good).bold(),
+        ));
+    }
     if let Some(ref hs) = stream.handshake {
         header_spans.push(Span::raw("  "));
         if let Some(total) = hs.total_ms() {
@@ -1163,7 +1171,16 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
                 StreamDirection::AtoB => app.theme.status_good,
                 StreamDirection::BtoA => Color::Magenta,
             };
-            for chunk in seg.payload.chunks(16) {
+            let bytes = seg.decrypted.as_deref().unwrap_or(&seg.payload);
+            // Dim raw (handshake / undecrypted) segments once a decrypted
+            // conversation exists, so the plaintext reads clearly.
+            let dim = stream_has_decrypted && seg.decrypted.is_none();
+            let (hex_color, ascii_color) = if dim {
+                (app.theme.text_muted, app.theme.text_muted)
+            } else {
+                (app.theme.status_good, app.theme.status_warn)
+            };
+            for chunk in bytes.chunks(16) {
                 let hex: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
                 let ascii: String = chunk
                     .iter()
@@ -1177,11 +1194,8 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
                     .collect();
                 lines.push(Line::from(vec![
                     Span::styled(format!(" {arrow} "), Style::default().fg(arrow_color)),
-                    Span::styled(
-                        format!("{:<50}", hex),
-                        Style::default().fg(app.theme.status_good),
-                    ),
-                    Span::styled(ascii, Style::default().fg(app.theme.status_warn)),
+                    Span::styled(format!("{:<50}", hex), Style::default().fg(hex_color)),
+                    Span::styled(ascii, Style::default().fg(ascii_color)),
                 ]));
             }
         }
@@ -1198,8 +1212,15 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
                 StreamDirection::AtoB => app.theme.status_good,
                 StreamDirection::BtoA => Color::Magenta,
             };
-            let text: String = seg
-                .payload
+            let bytes = seg.decrypted.as_deref().unwrap_or(&seg.payload);
+            // Dim raw (handshake / undecrypted) segments once a decrypted
+            // conversation exists, so the plaintext reads clearly.
+            let text_style = if stream_has_decrypted && seg.decrypted.is_none() {
+                Style::default().fg(app.theme.text_muted)
+            } else {
+                Style::default()
+            };
+            let text: String = bytes
                 .iter()
                 .map(|&b| {
                     if b.is_ascii_graphic() || b == b' ' || b == b'\t' {
@@ -1214,7 +1235,7 @@ fn render_stream_view(f: &mut Frame, app: &App, area: Rect) {
             for text_line in text.lines() {
                 lines.push(Line::from(vec![
                     Span::styled(format!(" {arrow} "), Style::default().fg(arrow_color)),
-                    Span::raw(text_line.to_string()),
+                    Span::styled(text_line.to_string(), text_style),
                 ]));
             }
         }
