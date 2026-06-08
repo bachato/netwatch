@@ -15,13 +15,12 @@
 //!    brotli (which has no magic) as a fallback.
 //!
 //! ## Scope
-//! [`try_decode_single_packet`] handles the single-packet, offset-0 case (a
-//! response small enough to fit one 1-RTT packet). For responses spanning
-//! multiple packets, [`H3StreamReassembler`] (Phase 3b) accumulates STREAM-frame
-//! bytes per stream id, by offset, across packets and decodes the contiguous
+//! [`H3StreamReassembler`] (Phase 3b) accumulates STREAM-frame bytes per
+//! (stream, direction), by offset, across packets and decodes the contiguous
 //! prefix from byte 0 — a gzip/brotli stream must be fed from the start, so a
-//! body is only recovered once its head and a contiguous run are present. zstd
-//! and identity (uncompressed) bodies are out of scope.
+//! body is only recovered once its head and a contiguous run are present. A
+//! response that fits one packet is just the single-chunk case of the same
+//! path. zstd and identity (uncompressed) bodies are out of scope.
 
 use std::io::Read;
 
@@ -328,29 +327,6 @@ fn inflate_brotli(body: &[u8]) -> Option<Vec<u8>> {
     d.read_to_end(&mut out).ok().map(|_| out)
 }
 
-/// Phase 3a: from a single decrypted 1-RTT packet's frame bytes, if it
-/// carries an offset-0 STREAM with HTTP/3 DATA we can decompress, return the
-/// decoded body. Mid-stream packets (offset > 0) return `None` — those need
-/// cross-packet reassembly (Phase 3b).
-pub fn try_decode_single_packet(frames: &[u8]) -> Option<DecodedBody> {
-    for chunk in extract_stream_chunks(frames) {
-        if chunk.offset != 0 {
-            continue;
-        }
-        let Some(body) = h3_data_payload(&chunk.data) else {
-            continue;
-        };
-        if let Some((encoding, bytes)) = decompress_body(&body) {
-            return Some(DecodedBody {
-                encoding,
-                stream_id: chunk.stream_id,
-                bytes,
-            });
-        }
-    }
-    None
-}
-
 /// Per-stream byte cap and concurrent-stream cap, to bound memory on a busy
 /// QUIC flow. A 2 MiB body is already far beyond what any single 1-RTT packet
 /// carries; past it we keep the decodable prefix and drop the overflow.
@@ -359,16 +335,25 @@ const MAX_H3_STREAMS: usize = 64;
 
 /// Cross-packet HTTP/3 stream reassembly (Phase 3b).
 ///
-/// Feed each decrypted 1-RTT packet's frame bytes to [`ingest`]; it routes the
-/// STREAM-frame data into a per–stream-id buffer at the frame's offset and
-/// re-decodes the **contiguous prefix from offset 0** whenever it grows. Only
-/// the contiguous prefix is decoded: feeding a gzip/brotli decompressor across a
-/// gap (a not-yet-received range) would corrupt it, and a body can't be
-/// recovered until its head plus a contiguous run are present anyway. Read
-/// recovered bodies via [`decoded_bodies`].
+/// Feed each decrypted 1-RTT packet's frame bytes to [`ingest`] with the packet
+/// direction; it routes STREAM-frame data into a per-(stream, direction) buffer
+/// at the frame's offset. A QUIC *bidirectional* stream carries two independent
+/// byte streams — request (c→s) and response (s→c) — each with its own offset
+/// space starting at 0, so direction is part of the key; otherwise the request
+/// and response would overwrite each other. Only client-initiated bidirectional
+/// streams (`stream_id % 4 == 0`, the HTTP/3 request/response streams) are
+/// tracked; control/QPACK/push streams are ignored.
+///
+/// Decoding is lazy: [`ingest`] only buffers (a memcpy + range bookkeeping) so it
+/// stays off the capture hot path; [`decoded_bodies`] decompresses the
+/// **contiguous prefix from offset 0** (feeding a gzip/brotli decoder across a
+/// not-yet-received gap would corrupt it) and caches the result, re-running only
+/// when more contiguous bytes have arrived.
 #[derive(Debug, Clone, Default)]
 pub struct H3StreamReassembler {
-    streams: std::collections::BTreeMap<u64, H3Stream>,
+    /// Keyed by (HTTP/3 stream id, client_to_server) — see the type doc for why
+    /// direction is part of the key.
+    streams: std::collections::BTreeMap<(u64, bool), H3Stream>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -417,13 +402,18 @@ impl H3StreamReassembler {
         Self::default()
     }
 
-    /// Feed one decrypted 1-RTT packet's frame bytes. Writes each STREAM frame's
-    /// data into its stream's buffer at the frame offset and re-decodes the
-    /// contiguous prefix if it grew.
-    pub fn ingest(&mut self, frames: &[u8]) {
+    /// Buffer one decrypted 1-RTT packet's frame bytes for the given direction.
+    /// Cheap — memcpy + range bookkeeping only, no decompression (that happens
+    /// lazily in [`decoded_bodies`]) — so it's safe on the capture hot path.
+    pub fn ingest(&mut self, client_to_server: bool, frames: &[u8]) {
         for chunk in extract_stream_chunks(frames) {
-            if !self.streams.contains_key(&chunk.stream_id) && self.streams.len() >= MAX_H3_STREAMS
-            {
+            // HTTP/3 request/response data rides client-initiated bidirectional
+            // streams (id % 4 == 0); skip control/QPACK/push streams.
+            if chunk.stream_id % 4 != 0 {
+                continue;
+            }
+            let key = (chunk.stream_id, client_to_server);
+            if !self.streams.contains_key(&key) && self.streams.len() >= MAX_H3_STREAMS {
                 continue;
             }
             let start = chunk.offset;
@@ -433,7 +423,7 @@ impl H3StreamReassembler {
             if end as usize > MAX_H3_STREAM_BYTES {
                 continue;
             }
-            let st = self.streams.entry(chunk.stream_id).or_default();
+            let st = self.streams.entry(key).or_default();
             if end as usize > st.data.len() {
                 st.data.resize(end as usize, 0);
             }
@@ -442,6 +432,16 @@ impl H3StreamReassembler {
             if chunk.fin {
                 st.fin = true;
             }
+        }
+    }
+
+    /// Bodies recovered so far — one per (stream, direction) whose contiguous
+    /// prefix decodes. Decodes lazily and caches per stream, re-running the
+    /// decompressor only when the contiguous prefix has grown, so calling this
+    /// every render frame is cheap once a body is decoded.
+    pub fn decoded_bodies(&mut self) -> Vec<DecodedBody> {
+        let mut out = Vec::new();
+        for (&(stream_id, _dir), st) in self.streams.iter_mut() {
             let clen = st.contiguous_len();
             if clen > st.decoded_len {
                 st.decoded_len = clen;
@@ -450,7 +450,7 @@ impl H3StreamReassembler {
                     .and_then(|body| decompress_body(&body))
                     .map(|(encoding, bytes)| DecodedBody {
                         encoding,
-                        stream_id: chunk.stream_id,
+                        stream_id,
                         bytes,
                     });
                 if let Some(body) = &st.decoded {
@@ -460,7 +460,7 @@ impl H3StreamReassembler {
                         // was reassembled across multiple 1-RTT packets.
                         tracing::debug!(
                             target: "netwatch::dpi::http3",
-                            stream_id = chunk.stream_id,
+                            stream_id,
                             prefix_bytes = clen,
                             body_bytes = body.bytes.len(),
                             encoding = body.encoding.label(),
@@ -469,16 +469,11 @@ impl H3StreamReassembler {
                     }
                 }
             }
+            if let Some(body) = &st.decoded {
+                out.push(body.clone());
+            }
         }
-    }
-
-    /// Bodies recovered so far — one per HTTP/3 stream whose contiguous prefix
-    /// has decoded, in ascending stream-id order.
-    pub fn decoded_bodies(&self) -> Vec<DecodedBody> {
-        self.streams
-            .values()
-            .filter_map(|s| s.decoded.clone())
-            .collect()
+        out
     }
 }
 
@@ -588,27 +583,6 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_offset0_gzip_body_decodes() {
-        let body = b"{\"ok\":true,\"msg\":\"the quick brown fox\"}".repeat(4);
-        let h3 = h3_data_frame(&gzip(&body));
-        let frame = stream_frame(0, 0, &h3);
-        let decoded = try_decode_single_packet(&frame).expect("offset-0 body must decode");
-        assert_eq!(decoded.encoding, BodyEncoding::Gzip);
-        assert_eq!(decoded.stream_id, 0);
-        assert_eq!(decoded.bytes, body);
-    }
-
-    #[test]
-    fn midstream_offset_is_not_decoded() {
-        // Same body but the STREAM frame starts at a non-zero offset — we
-        // can't decompress a fragment, so this must return None.
-        let body = b"compressible compressible compressible".to_vec();
-        let h3 = h3_data_frame(&gzip(&body));
-        let frame = stream_frame(0, 4096, &h3);
-        assert!(try_decode_single_packet(&frame).is_none());
-    }
-
-    #[test]
     fn h3_data_skips_headers_frame() {
         // A HEADERS frame (QPACK bytes we can't read) followed by DATA.
         let mut stream = varint(H3_FRAME_HEADERS);
@@ -628,13 +602,13 @@ mod tests {
         let (a, b, c) = (&h3[..n / 3], &h3[n / 3..2 * n / 3], &h3[2 * n / 3..]);
 
         let mut r = H3StreamReassembler::new();
-        r.ingest(&stream_frame(0, 0, a));
+        r.ingest(false, &stream_frame(0, 0, a));
         assert!(
             r.decoded_bodies().is_empty(),
             "a partial gzip stream must not decode yet"
         );
-        r.ingest(&stream_frame(0, (n / 3) as u64, b));
-        r.ingest(&stream_frame(0, (2 * n / 3) as u64, c));
+        r.ingest(false, &stream_frame(0, (n / 3) as u64, b));
+        r.ingest(false, &stream_frame(0, (2 * n / 3) as u64, c));
 
         let bodies = r.decoded_bodies();
         assert_eq!(bodies.len(), 1);
@@ -651,14 +625,14 @@ mod tests {
 
         let mut r = H3StreamReassembler::new();
         // Tail fragment arrives first — no contiguous prefix from 0 yet.
-        r.ingest(&stream_frame(7, mid as u64, &h3[mid..]));
+        r.ingest(false, &stream_frame(4, mid as u64, &h3[mid..]));
         assert!(r.decoded_bodies().is_empty(), "no head yet");
         // Head fills the gap; now the whole prefix is contiguous.
-        r.ingest(&stream_frame(7, 0, &h3[..mid]));
+        r.ingest(false, &stream_frame(4, 0, &h3[..mid]));
 
         let bodies = r.decoded_bodies();
         assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0].stream_id, 7);
+        assert_eq!(bodies[0].stream_id, 4);
         assert_eq!(bodies[0].bytes, body);
     }
 
@@ -668,19 +642,49 @@ mod tests {
         let body = b"x".repeat(200);
         let h3 = h3_data_frame(&gzip(&body));
         let mut r = H3StreamReassembler::new();
-        r.ingest(&stream_frame(3, 4096, &h3));
+        r.ingest(false, &stream_frame(8, 4096, &h3));
         assert!(r.decoded_bodies().is_empty());
     }
 
     #[test]
     fn reassembler_single_packet_parity() {
-        // A body that fits one packet decodes the same as try_decode_single_packet.
+        // A body that fits one packet is just the single-chunk case.
         let body = b"single packet body ".repeat(8);
         let h3 = h3_data_frame(&gzip(&body));
         let mut r = H3StreamReassembler::new();
-        r.ingest(&stream_frame(0, 0, &h3));
+        r.ingest(false, &stream_frame(0, 0, &h3));
         let bodies = r.decoded_bodies();
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0].bytes, body);
+    }
+
+    #[test]
+    fn reassembler_separates_request_and_response_on_same_stream() {
+        // A QUIC bidirectional stream (id 0) carries the request (c→s) and the
+        // response (s→c) at *independent* offset spaces both starting at 0.
+        // Keying by direction must keep them from overwriting each other —
+        // without it, the two would corrupt one buffer.
+        let req = b"this is the gzipped request body ".repeat(40);
+        let resp = b"and this is the gzipped response body ".repeat(40);
+        let mut r = H3StreamReassembler::new();
+        r.ingest(true, &stream_frame(0, 0, &h3_data_frame(&gzip(&req)))); // request
+        r.ingest(false, &stream_frame(0, 0, &h3_data_frame(&gzip(&resp)))); // response
+
+        let bodies = r.decoded_bodies();
+        assert_eq!(bodies.len(), 2, "request and response must both survive");
+        let got: Vec<&Vec<u8>> = bodies.iter().map(|b| &b.bytes).collect();
+        assert!(got.contains(&&req), "request body intact");
+        assert!(got.contains(&&resp), "response body intact");
+    }
+
+    #[test]
+    fn reassembler_ignores_non_request_streams() {
+        // Control / QPACK / unidirectional streams (id % 4 != 0) aren't HTTP/3
+        // request/response streams and must not be buffered or decoded.
+        let h3 = h3_data_frame(&gzip(&b"not a request stream ".repeat(20)));
+        let mut r = H3StreamReassembler::new();
+        r.ingest(false, &stream_frame(2, 0, &h3)); // client unidirectional
+        r.ingest(false, &stream_frame(3, 0, &h3)); // server unidirectional
+        assert!(r.decoded_bodies().is_empty());
     }
 }

@@ -974,9 +974,9 @@ impl StreamTracker {
                             s.quic_decrypt.dcid_len_s2c = Some(dcid_len as u8);
                             s.quic_decrypt.largest_pn_s2c = s.quic_decrypt.largest_pn_s2c.max(pn);
                         }
-                        // Feed the decrypted frames into cross-packet HTTP/3
-                        // reassembly so multi-packet bodies decode (Phase 3b).
-                        s.quic_h3.ingest(&plain);
+                        // Buffer the decrypted frames for cross-packet HTTP/3
+                        // reassembly (Phase 3b); decode happens lazily in the UI.
+                        s.quic_h3.ingest(client_to_server, &plain);
                     }
                     tracing::trace!(target: "netwatch::dpi::quic", stream_index, client_to_server, dcid_len, pn, plain_len = plain.len(), "decrypted QUIC 1-RTT packet");
                     return Some(plain);
@@ -1366,13 +1366,15 @@ impl PacketCollector {
             .cloned()
     }
 
-    /// Reassembled HTTP/3 bodies for a flow (Phase 3b). Clones only the decoded
-    /// bodies, not the whole `Stream`, so the UI can call it per render frame.
+    /// Reassembled HTTP/3 bodies for a flow (Phase 3b). Decodes lazily (cached
+    /// per stream) and clones only the decoded bodies, not the whole `Stream`,
+    /// so the UI can call it per render frame.
     pub fn quic_h3_bodies(&self, index: u32) -> Vec<crate::dpi::http3::DecodedBody> {
         self.stream_tracker
             .lock()
             .unwrap()
-            .get_stream(index)
+            .all_streams
+            .get_mut(&index)
             .map(|s| s.quic_h3.decoded_bodies())
             .unwrap_or_default()
     }
