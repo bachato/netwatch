@@ -45,6 +45,7 @@ pub enum AlertCategory {
     Beaconing,
     DnsTunnel,
     Bandwidth,
+    PolicyViolation,
 }
 
 impl AlertCategory {
@@ -54,6 +55,7 @@ impl AlertCategory {
             Self::Beaconing => "Beaconing",
             Self::DnsTunnel => "DNS Tunnel",
             Self::Bandwidth => "Bandwidth",
+            Self::PolicyViolation => "Egress Policy",
         }
     }
 }
@@ -243,6 +245,19 @@ impl NetworkIntelCollector {
 
     pub fn alert_history(&self) -> &VecDeque<Alert> {
         &self.alert_history
+    }
+
+    /// Raise an egress-policy-violation warning (Horizon 3). Warning
+    /// severity — a lint, not an incident — so it surfaces in the alert feed
+    /// but never auto-freezes the recorder. Per-flow dedup is handled
+    /// upstream by the egress profiler's cooldown.
+    pub fn raise_policy_violation(&mut self, message: String, detail: String) {
+        self.push_alert(
+            AlertSeverity::Warning,
+            AlertCategory::PolicyViolation,
+            message,
+            detail,
+        );
     }
 
     // ── Memory-stats accessors (drive the `M` debug overlay) ──────────

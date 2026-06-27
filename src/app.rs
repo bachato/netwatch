@@ -409,6 +409,9 @@ pub struct App {
     pub traceroute_runner: TracerouteRunner,
     pub connection_timeline: ConnectionTimeline,
     pub network_intel: NetworkIntelCollector,
+    /// Observe-mode egress profiles (Horizon 3): per-process `{SNI, ASN,
+    /// port}` baselines learned from the live connection table.
+    pub egress_profiler: crate::collectors::egress::EgressProfiler,
     intel_last_pkt_id: u64,
     /// Linux-only kernel attribution path. Holds the SDK's `EventSource`
     /// (loaded BPF program + reader thread) and an `EbpfAttributor` cache
@@ -604,6 +607,7 @@ impl App {
             traceroute_runner: TracerouteRunner::new(),
             connection_timeline: ConnectionTimeline::new(),
             network_intel,
+            egress_profiler: crate::collectors::egress::EgressProfiler::with_default_policy(),
             intel_last_pkt_id: 0,
             #[cfg(feature = "ebpf")]
             conn_tracker: conn_tracker_opt,
@@ -768,6 +772,32 @@ impl App {
         self.ui.export_status_tick = 0;
     }
 
+    /// Ratify the observed egress baseline into `egress-policy.toml` and load
+    /// it, so warn-on-drift takes effect immediately. The written file is
+    /// meant to be reviewed/edited — human ratification is what defeats
+    /// baseline poisoning.
+    fn promote_egress_policy(&mut self) {
+        use crate::collectors::egress;
+        let policy = self.egress_profiler.promote();
+        let proc_count = policy.process.len();
+        let Some(path) = egress::default_policy_path() else {
+            self.ui.export_status = Some("Egress promote failed: no config dir".into());
+            return;
+        };
+        match egress::save_policy_file(&policy, &path) {
+            Ok(()) => {
+                self.egress_profiler.set_policy(Some(policy));
+                self.ui.export_status = Some(format!(
+                    "Egress policy promoted: {proc_count} processes → {}",
+                    path.display()
+                ));
+            }
+            Err(e) => {
+                self.ui.export_status = Some(format!("Egress promote failed: {e}"));
+            }
+        }
+    }
+
     fn disarm_incident_recorder(&mut self) {
         self.incident_recorder.disarm();
         if self.incident_capture_started && self.packet_collector.is_capturing() {
@@ -909,6 +939,16 @@ impl App {
             self.connection_collector.update();
             let conns = self.connection_collector.connections();
             self.connection_timeline.update(&conns);
+            // Observe-mode egress profiling (Horizon 3): learn per-process
+            // {SNI, ASN, port} baselines from the live connection table, and
+            // — when a policy is loaded — warn on flows that drift from it.
+            self.egress_profiler.observe(&conns, &self.geo_cache);
+            for v in self.egress_profiler.take_violations() {
+                self.network_intel.raise_policy_violation(
+                    format!("Egress drift: {} → {}", v.process, v.dest),
+                    format!("{} (port {})", v.reason, v.port),
+                );
+            }
             let interfaces = self.traffic.interfaces();
             self.process_bandwidth.update(&conns, &interfaces);
             update_top_conn_history(&mut self.caches.top_conn_history, &conns);
@@ -2120,6 +2160,11 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.ui.show_memory_stats = !app.ui.show_memory_stats;
         }
         KeyCode::Char('g') => app.ui.show_geo = !app.ui.show_geo,
+        KeyCode::Char('P') => {
+            // Shift+P — promote the observed egress baseline into a policy
+            // file (Horizon 3: observe → *promote* → warn-on-drift).
+            app.promote_egress_policy();
+        }
         KeyCode::Char('t')
             if app.ui.current_tab != Tab::Timeline && app.ui.current_tab != Tab::Stats =>
         {

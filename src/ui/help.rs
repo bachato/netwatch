@@ -114,6 +114,11 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line(theme, "g", "Toggle GeoIP location display"));
     lines.push(key_line(
         theme,
+        "P (shift)",
+        "Promote observed egress baseline → egress-policy.toml (warn on drift)",
+    ));
+    lines.push(key_line(
+        theme,
         "t",
         "Cycle theme (dark/ocean/solarized/dracula/nord/sky/paper)",
     ));

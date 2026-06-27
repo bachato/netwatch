@@ -32,6 +32,7 @@ impl Gauge {
 }
 
 fn gather(app: &App) -> Vec<Gauge> {
+    use crate::collectors::egress::MAX_PROCESSES;
     use crate::collectors::network_intel::{MAX_TRACKED_BEACONS, MAX_TRACKED_IPS};
     use crate::collectors::packets::{MAX_STREAMS, STREAM_EVICT_BATCH};
 
@@ -81,6 +82,14 @@ fn gather(app: &App) -> Vec<Gauge> {
         current: app.network_intel.alert_history_len(),
         cap: 100,
         note: "ring buffer; oldest dropped",
+    });
+
+    // ── Egress profiler (Horizon 3 observe mode) ──
+    out.push(Gauge {
+        name: "egress profiler — processes",
+        current: app.egress_profiler.process_count(),
+        cap: MAX_PROCESSES,
+        note: "LRU evicted on oldest last_seen",
     });
 
     // ── Packet ring ──

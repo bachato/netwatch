@@ -1,5 +1,6 @@
 pub mod config;
 pub mod connections;
+pub mod egress;
 pub mod geo;
 pub mod health;
 pub mod incident;
