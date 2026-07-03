@@ -16,6 +16,15 @@ All notable changes to NetWatch will be documented in this file.
   - **`PolicyViolation` alerts**: flows outside a declared allowlist raise a
     Warning-severity alert naming the broken rule, with a per-flow cooldown. Only
     processes with a rule are checked; the linter warns, it never blocks.
+  - **Persistent baseline**: learned profiles survive restarts
+    (`<state_dir>/netwatch/egress-profiles.json`, saved once a minute and at quit;
+    Landlock allow-listed). Destinations not seen for 30 days age out at load.
+    `First`/`Last` columns show how long each destination has been known.
+  - **Selective promotion**: `Enter` promotes just the selected process, with a
+    diff on the status line (`+2 SNI, +1 ports`). Promotion now **merges** into
+    `egress-policy.toml` via `toml_edit` — hand edits, comments, and rules for
+    other processes survive; an unparseable policy file is refused, never
+    clobbered.
 
 ## [0.25.9] - 2026-06-27
 

@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,11 @@ const MAX_DESTS_PER_PROCESS: usize = 128;
 /// Re-warn at most this often for the same (process, destination, port)
 /// policy violation, so a continuously-violating flow doesn't alert-storm.
 const VIOLATION_COOLDOWN_SECS: u64 = 300;
+/// Persisted destinations not seen for this long are dropped at load time,
+/// so the baseline ages out instead of accreting forever.
+const STALE_DEST_SECS: u64 = 30 * 24 * 3600;
+/// Write the learned baseline to disk at most this often (plus once at quit).
+const PERSIST_INTERVAL_SECS: u64 = 60;
 
 /// One observed destination for a process.
 #[derive(Clone, Debug)]
@@ -42,8 +47,11 @@ pub struct EgressDest {
     /// when the ASN database resolved it.
     pub asn_org: Option<String>,
     pub port: u16,
-    pub first_seen: Instant,
-    pub last_seen: Instant,
+    /// Wall-clock times, not `Instant`: the evidence a human reviews at
+    /// promote time ("known for 3 weeks" vs "showed up 40 seconds ago")
+    /// must survive restarts, and the persisted baseline serializes them.
+    pub first_seen: SystemTime,
+    pub last_seen: SystemTime,
     /// Number of observations (connection-refresh ticks this dest appeared).
     pub count: u64,
 }
@@ -58,7 +66,7 @@ type DestKey = (String, u16);
 pub struct EgressProfile {
     pub process: String,
     pub dests: HashMap<DestKey, EgressDest>,
-    pub last_seen: Instant,
+    pub last_seen: SystemTime,
 }
 
 /// A flow that violated a declared egress rule. Surfaced as a warning —
@@ -84,6 +92,8 @@ pub struct EgressProfiler {
     violation_cooldown: HashMap<(String, String, u16), Instant>,
     /// Newly-detected violations awaiting drain by the caller.
     pending: Vec<Violation>,
+    /// Last time the baseline was written to disk (rate-limits `maybe_persist`).
+    last_persist: Option<Instant>,
 }
 
 impl EgressProfiler {
@@ -91,11 +101,16 @@ impl EgressProfiler {
         Self::default()
     }
 
-    /// Construct and load the policy from the default path, if one exists.
+    /// Construct and load both the declared policy and the persisted learned
+    /// baseline from their default paths, when present. A 20-minute session
+    /// isn't a baseline — the profiles carry across restarts.
     pub fn with_default_policy() -> Self {
         let mut profiler = Self::new();
         if let Some(path) = default_policy_path() {
             profiler.set_policy(load_policy_file(&path));
+        }
+        if let Some(path) = default_profiles_path() {
+            profiler.load_profiles(&path);
         }
         profiler
     }
@@ -106,6 +121,7 @@ impl EgressProfiler {
     /// thing we baseline; LAN/loopback chatter isn't.
     pub fn observe(&mut self, connections: &[Connection], geo: &GeoCache) {
         let now = Instant::now();
+        let wall = SystemTime::now();
         for conn in connections {
             let Some(process) = conn.process_name.as_deref() else {
                 continue;
@@ -125,7 +141,7 @@ impl EgressProfiler {
 
             let sni = dest_hostname(&conn.app_protocol);
             let asn_org = geo.lookup(&ip).map(|g| g.org).filter(|o| !o.is_empty());
-            self.record(process, &ip, port, sni.clone(), asn_org.clone(), now);
+            self.record(process, &ip, port, sni.clone(), asn_org.clone(), wall);
             self.check_policy(process, &ip, port, &sni, &asn_org, now);
         }
         self.evict_processes_if_needed();
@@ -210,31 +226,23 @@ impl EgressProfiler {
     pub fn promote(&self) -> EgressPolicy {
         let mut policy = EgressPolicy::default();
         for profile in self.profiles.values() {
-            let mut allow_sni = BTreeSet::new();
-            let mut allow_asn = BTreeSet::new();
-            let mut allow_ports = BTreeSet::new();
-            for dest in profile.dests.values() {
-                match (&dest.sni, &dest.asn_org) {
-                    (Some(s), _) => {
-                        allow_sni.insert(s.clone());
-                    }
-                    (None, Some(a)) => {
-                        allow_asn.insert(a.clone());
-                    }
-                    (None, None) => {}
-                }
-                allow_ports.insert(dest.port);
-            }
-            policy.process.insert(
-                profile.process.clone(),
-                ProcessRule {
-                    allow_sni: allow_sni.into_iter().collect(),
-                    allow_asn: allow_asn.into_iter().collect(),
-                    allow_ports: allow_ports.into_iter().collect(),
-                },
-            );
+            policy
+                .process
+                .insert(profile.process.clone(), rule_from_profile(profile));
         }
         policy
+    }
+
+    /// Ratify a single process's observed baseline — selective promotion, so
+    /// a reviewed rule can be adopted without blessing every other process's
+    /// traffic along with it. `None` if the process has no profile.
+    pub fn promote_one(&self, process: &str) -> Option<ProcessRule> {
+        self.profiles.get(process).map(rule_from_profile)
+    }
+
+    /// The currently-declared rule for a process, if any (for promote diffs).
+    pub fn declared_rule(&self, process: &str) -> Option<&ProcessRule> {
+        self.policy.as_ref()?.process.get(process)
     }
 
     /// Record one observed (process, destination) pair. Split out from
@@ -248,7 +256,7 @@ impl EgressProfiler {
         port: u16,
         sni: Option<String>,
         asn_org: Option<String>,
-        now: Instant,
+        now: SystemTime,
     ) {
         let label = sni
             .clone()
@@ -264,7 +272,7 @@ impl EgressProfiler {
         sni: Option<String>,
         asn_org: Option<String>,
         port: u16,
-        now: Instant,
+        now: SystemTime,
     ) {
         let profile = self
             .profiles
@@ -345,6 +353,184 @@ impl EgressProfiler {
         out.sort_by(|a, b| a.process.cmp(&b.process));
         out
     }
+
+    // ── Baseline persistence ────────────────────────────────────────────
+
+    /// Write the learned baseline to the default path if one is due
+    /// (rate-limited). Call from the observe tick; cheap when not due.
+    pub fn maybe_persist(&mut self) {
+        let due = self
+            .last_persist
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(PERSIST_INTERVAL_SECS));
+        if due {
+            self.persist_now();
+        }
+    }
+
+    /// Write the learned baseline to the default path immediately (quit path).
+    pub fn persist_now(&mut self) {
+        let Some(path) = default_profiles_path() else {
+            return;
+        };
+        if let Err(e) = self.save_profiles(&path) {
+            tracing::warn!(target: "netwatch::egress", path = %path.display(), error = %e, "egress baseline save failed");
+        }
+        self.last_persist = Some(Instant::now());
+    }
+
+    /// Serialize the learned baseline to `path` as versioned JSON.
+    pub fn save_profiles(&self, path: &Path) -> std::io::Result<()> {
+        let persisted = PersistedProfiles {
+            version: 1,
+            profiles: self
+                .profiles
+                .values()
+                .map(|p| PersistedProfile {
+                    process: p.process.clone(),
+                    dests: p
+                        .dests
+                        .iter()
+                        .map(|((label, port), d)| PersistedDest {
+                            label: label.clone(),
+                            port: *port,
+                            sni: d.sni.clone(),
+                            asn_org: d.asn_org.clone(),
+                            first_seen: unix_secs(d.first_seen),
+                            last_seen: unix_secs(d.last_seen),
+                            count: d.count,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let body = serde_json::to_string(&persisted)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, body)
+    }
+
+    /// Merge a persisted baseline from `path` into the profiler, dropping
+    /// destinations not seen within `STALE_DEST_SECS` (the baseline ages out
+    /// instead of accreting forever). Best-effort: absent or unparseable
+    /// files are ignored — the baseline re-learns.
+    pub fn load_profiles(&mut self, path: &Path) {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let persisted: PersistedProfiles = match serde_json::from_str(&contents) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(target: "netwatch::egress", path = %path.display(), error = %e, "egress baseline parse failed; re-learning");
+                return;
+            }
+        };
+        let now = SystemTime::now();
+        for profile in persisted.profiles {
+            for dest in profile.dests {
+                let last_seen = from_unix_secs(dest.last_seen);
+                let age_ok = now
+                    .duration_since(last_seen)
+                    .map(|d| d.as_secs() < STALE_DEST_SECS)
+                    .unwrap_or(true); // future timestamp (clock skew) → keep
+                if !age_ok {
+                    continue;
+                }
+                let entry = self
+                    .profiles
+                    .entry(profile.process.clone())
+                    .or_insert_with(|| EgressProfile {
+                        process: profile.process.clone(),
+                        dests: HashMap::new(),
+                        last_seen,
+                    });
+                entry.last_seen = entry.last_seen.max(last_seen);
+                if entry.dests.len() >= MAX_DESTS_PER_PROCESS {
+                    continue;
+                }
+                entry
+                    .dests
+                    .entry((dest.label, dest.port))
+                    .or_insert(EgressDest {
+                        sni: dest.sni,
+                        asn_org: dest.asn_org,
+                        port: dest.port,
+                        first_seen: from_unix_secs(dest.first_seen),
+                        last_seen,
+                        count: dest.count,
+                    });
+            }
+        }
+        self.evict_processes_if_needed();
+    }
+}
+
+/// Build the allowlist rule a profile's observations imply.
+fn rule_from_profile(profile: &EgressProfile) -> ProcessRule {
+    let mut allow_sni = BTreeSet::new();
+    let mut allow_asn = BTreeSet::new();
+    let mut allow_ports = BTreeSet::new();
+    for dest in profile.dests.values() {
+        match (&dest.sni, &dest.asn_org) {
+            (Some(s), _) => {
+                allow_sni.insert(s.clone());
+            }
+            (None, Some(a)) => {
+                allow_asn.insert(a.clone());
+            }
+            (None, None) => {}
+        }
+        allow_ports.insert(dest.port);
+    }
+    ProcessRule {
+        allow_sni: allow_sni.into_iter().collect(),
+        allow_asn: allow_asn.into_iter().collect(),
+        allow_ports: allow_ports.into_iter().collect(),
+    }
+}
+
+fn unix_secs(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn from_unix_secs(s: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(s)
+}
+
+/// On-disk shape of the learned baseline (versioned so later phases can
+/// migrate). Timestamps are unix seconds.
+#[derive(Serialize, Deserialize)]
+struct PersistedProfiles {
+    version: u32,
+    profiles: Vec<PersistedProfile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedProfile {
+    process: String,
+    dests: Vec<PersistedDest>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedDest {
+    label: String,
+    port: u16,
+    sni: Option<String>,
+    asn_org: Option<String>,
+    first_seen: u64,
+    last_seen: u64,
+    count: u64,
+}
+
+/// Default learned-baseline location: `<state_dir>/netwatch/egress-profiles.json`
+/// (`~/.local/state` on Linux; falls back to the local data dir on macOS).
+pub fn default_profiles_path() -> Option<PathBuf> {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|d| d.join("netwatch").join("egress-profiles.json"))
 }
 
 // ── Declared egress policy ─────────────────────────────────────────────
@@ -439,6 +625,81 @@ pub fn save_policy_file(policy: &EgressPolicy, path: &Path) -> std::io::Result<(
     std::fs::write(path, format!("{header}{body}"))
 }
 
+const POLICY_HEADER: &str = "# netwatch egress policy (observe → promote → warn).\n\
+                             # Generated from the observed baseline; review before trusting.\n\
+                             # The linter WARNS on drift — it never blocks.\n\n";
+
+/// Upsert `rules` into the policy file, preserving everything else — hand
+/// edits, comments, and rules for processes not being promoted. Promotion
+/// merges; it never deletes. Refuses (rather than clobbers) a file that no
+/// longer parses, so a broken hand edit is never silently thrown away.
+pub fn merge_rules_into_policy_file(
+    rules: &[(String, ProcessRule)],
+    path: &Path,
+) -> std::io::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => POLICY_HEADER.to_string(),
+        Err(e) => return Err(e),
+    };
+    let mut doc: toml_edit::DocumentMut = existing.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("existing policy does not parse (fix it by hand first): {e}"),
+        )
+    })?;
+
+    let process_tbl = doc["process"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    if let Some(t) = process_tbl.as_table_mut() {
+        // Render `[process.<name>]` sections only — no bare `[process]`.
+        t.set_implicit(true);
+    }
+    for (name, rule) in rules {
+        let mut t = toml_edit::Table::new();
+        t["allow_sni"] = toml_edit::value(toml_edit::Array::from_iter(
+            rule.allow_sni.iter().map(String::as_str),
+        ));
+        t["allow_asn"] = toml_edit::value(toml_edit::Array::from_iter(
+            rule.allow_asn.iter().map(String::as_str),
+        ));
+        t["allow_ports"] = toml_edit::value(toml_edit::Array::from_iter(
+            rule.allow_ports.iter().map(|p| i64::from(*p)),
+        ));
+        doc["process"][name.as_str()] = toml_edit::Item::Table(t);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())
+}
+
+/// One-line summary of what promoting `new` changes relative to the declared
+/// rule — the pre-promote evidence shown on the status line.
+pub fn rule_diff(old: Option<&ProcessRule>, new: &ProcessRule) -> String {
+    fn added<T: PartialEq>(old: &[T], new: &[T]) -> usize {
+        new.iter().filter(|x| !old.contains(x)).count()
+    }
+    let Some(old) = old else {
+        return format!(
+            "new rule: {} SNI, {} ASN, {} ports",
+            new.allow_sni.len(),
+            new.allow_asn.len(),
+            new.allow_ports.len()
+        );
+    };
+    let (sni, asn, ports) = (
+        added(&old.allow_sni, &new.allow_sni),
+        added(&old.allow_asn, &new.allow_asn),
+        added(&old.allow_ports, &new.allow_ports),
+    );
+    if sni + asn + ports == 0 {
+        "no additions".to_string()
+    } else {
+        format!("+{sni} SNI, +{asn} ASN, +{ports} ports")
+    }
+}
+
 /// Extract the destination hostname from a flow's app-protocol: TLS/QUIC SNI
 /// (cleartext ClientHello) or the cleartext HTTP `Host`.
 fn dest_hostname(p: &Option<AppProtocol>) -> Option<String> {
@@ -461,7 +722,7 @@ mod tests {
     #[test]
     fn record_builds_per_process_profile_keyed_by_sni() {
         let mut p = EgressProfiler::new();
-        let now = Instant::now();
+        let now = SystemTime::now();
         p.record(
             "chrome",
             "142.250.1.1",
@@ -508,7 +769,7 @@ mod tests {
     #[test]
     fn falls_back_to_asn_then_ip_when_no_sni() {
         let mut p = EgressProfiler::new();
-        let now = Instant::now();
+        let now = SystemTime::now();
         p.record("curl", "9.9.9.9", 443, None, Some("Quad9".into()), now);
         p.record("nc", "203.0.113.7", 4444, None, None, now);
 
@@ -525,7 +786,7 @@ mod tests {
     #[test]
     fn backfills_sni_and_asn_discovered_later() {
         let mut p = EgressProfiler::new();
-        let now = Instant::now();
+        let now = SystemTime::now();
         // First sight: no name resolved yet → keyed on IP.
         p.record("app", "198.51.100.5", 443, None, None, now);
         // The dest exists under the IP label; a later sighting that DOES
@@ -584,7 +845,7 @@ mod tests {
     #[test]
     fn per_process_destinations_are_capped() {
         let mut p = EgressProfiler::new();
-        let now = Instant::now();
+        let now = SystemTime::now();
         for i in 0..(MAX_DESTS_PER_PROCESS + 50) {
             p.record(
                 "noisy",
@@ -651,7 +912,7 @@ mod tests {
     #[test]
     fn promote_then_policy_admits_the_observed_baseline() {
         let mut p = EgressProfiler::new();
-        let now = Instant::now();
+        let now = SystemTime::now();
         p.record(
             "chrome",
             "142.250.1.1",
@@ -742,5 +1003,197 @@ mod tests {
             now,
         );
         assert_eq!(p.take_violations().len(), 0);
+    }
+
+    // ── Phase 1: persistence, selective promote, merge, diff ──
+
+    /// Unique scratch path in the OS temp dir (no tempfile dep).
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "netwatch-egress-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn baseline_persists_across_profilers() {
+        let path = scratch("profiles.json");
+        let mut p = EgressProfiler::new();
+        p.record(
+            "chrome",
+            "142.250.1.1",
+            443,
+            sni("www.google.com"),
+            Some("Google LLC".into()),
+            SystemTime::now(),
+        );
+        p.save_profiles(&path).unwrap();
+
+        let mut fresh = EgressProfiler::new();
+        fresh.load_profiles(&path);
+        assert_eq!(fresh.process_count(), 1);
+        let snap = fresh.snapshot();
+        let dest = snap[0]
+            .dests
+            .get(&("www.google.com".to_string(), 443))
+            .unwrap();
+        assert_eq!(dest.count, 1);
+        assert_eq!(dest.asn_org.as_deref(), Some("Google LLC"));
+    }
+
+    #[test]
+    fn stale_destinations_age_out_at_load() {
+        let path = scratch("stale.json");
+        let mut p = EgressProfiler::new();
+        let stale = SystemTime::now() - Duration::from_secs(STALE_DEST_SECS + 3600);
+        p.record(
+            "old",
+            "203.0.113.1",
+            443,
+            sni("gone.example.com"),
+            None,
+            stale,
+        );
+        p.record(
+            "fresh",
+            "203.0.113.2",
+            443,
+            sni("live.example.com"),
+            None,
+            SystemTime::now(),
+        );
+        p.save_profiles(&path).unwrap();
+
+        let mut loaded = EgressProfiler::new();
+        loaded.load_profiles(&path);
+        let snap = loaded.snapshot();
+        assert!(
+            !snap.iter().any(|pr| pr.process == "old"),
+            "stale-only profile must not survive the load"
+        );
+        assert!(snap.iter().any(|pr| pr.process == "fresh"));
+    }
+
+    #[test]
+    fn load_merges_persisted_into_live_observations() {
+        let path = scratch("merge.json");
+        let mut p = EgressProfiler::new();
+        p.record(
+            "chrome",
+            "1.2.3.4",
+            443,
+            sni("persisted.example.com"),
+            None,
+            SystemTime::now(),
+        );
+        p.save_profiles(&path).unwrap();
+
+        let mut live = EgressProfiler::new();
+        live.record(
+            "chrome",
+            "5.6.7.8",
+            443,
+            sni("live.example.com"),
+            None,
+            SystemTime::now(),
+        );
+        live.load_profiles(&path);
+        let snap = live.snapshot();
+        assert_eq!(
+            snap[0].dests.len(),
+            2,
+            "persisted + live dests both present"
+        );
+    }
+
+    #[test]
+    fn promote_one_only_covers_that_process() {
+        let mut p = EgressProfiler::new();
+        let now = SystemTime::now();
+        p.record("chrome", "1.1.1.1", 443, sni("a.example.com"), None, now);
+        p.record("curl", "2.2.2.2", 443, sni("b.example.com"), None, now);
+
+        let rule = p.promote_one("chrome").unwrap();
+        assert!(rule.allow_sni.contains(&"a.example.com".to_string()));
+        assert!(!rule.allow_sni.contains(&"b.example.com".to_string()));
+        assert!(p.promote_one("nonexistent").is_none());
+    }
+
+    #[test]
+    fn merge_preserves_comments_and_other_rules() {
+        let path = scratch("policy.toml");
+        std::fs::write(
+            &path,
+            "# my hand-written note\n\n[process.ssh]\nallow_ports = [22] # keep tight\n",
+        )
+        .unwrap();
+
+        let rules = vec![(
+            "chrome".to_string(),
+            ProcessRule {
+                allow_sni: vec!["*.google.com".into()],
+                allow_asn: vec![],
+                allow_ports: vec![443],
+            },
+        )];
+        merge_rules_into_policy_file(&rules, &path).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# my hand-written note"), "comments survive");
+        assert!(body.contains("# keep tight"), "inline comments survive");
+        assert!(body.contains("[process.ssh]"), "unrelated rules survive");
+        let parsed: EgressPolicy = toml::from_str(&body).unwrap();
+        assert_eq!(
+            parsed.process.get("chrome").unwrap().allow_sni,
+            vec!["*.google.com".to_string()]
+        );
+        assert_eq!(parsed.process.get("ssh").unwrap().allow_ports, vec![22]);
+
+        // Re-promoting chrome replaces only chrome's rule.
+        let rules2 = vec![(
+            "chrome".to_string(),
+            ProcessRule {
+                allow_sni: vec!["*.google.com".into(), "*.gstatic.com".into()],
+                allow_asn: vec![],
+                allow_ports: vec![443],
+            },
+        )];
+        merge_rules_into_policy_file(&rules2, &path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# my hand-written note"));
+        assert!(body.contains("gstatic"));
+        assert!(body.contains("[process.ssh]"));
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_unparseable_policy() {
+        let path = scratch("broken.toml");
+        std::fs::write(&path, "[process.ssh\nallow_ports = [22]").unwrap(); // broken
+        let rules = vec![("x".to_string(), ProcessRule::default())];
+        let err = merge_rules_into_policy_file(&rules, &path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("[process.ssh\n"), "file untouched");
+    }
+
+    #[test]
+    fn rule_diff_reports_additions() {
+        let new = ProcessRule {
+            allow_sni: vec!["a.com".into(), "b.com".into()],
+            allow_asn: vec![],
+            allow_ports: vec![443],
+        };
+        assert_eq!(rule_diff(None, &new), "new rule: 2 SNI, 0 ASN, 1 ports");
+
+        let old = ProcessRule {
+            allow_sni: vec!["a.com".into()],
+            allow_asn: vec![],
+            allow_ports: vec![443],
+        };
+        assert_eq!(rule_diff(Some(&old), &new), "+1 SNI, +0 ASN, +0 ports");
+        assert_eq!(rule_diff(Some(&new), &new), "no additions");
     }
 }

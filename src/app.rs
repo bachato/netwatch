@@ -782,18 +782,56 @@ impl App {
     fn promote_egress_policy(&mut self) {
         use crate::collectors::egress;
         let policy = self.egress_profiler.promote();
-        let proc_count = policy.process.len();
+        let rules: Vec<_> = policy
+            .process
+            .iter()
+            .map(|(name, rule)| (name.clone(), rule.clone()))
+            .collect();
+        let proc_count = rules.len();
         let Some(path) = egress::default_policy_path() else {
             self.ui.export_status = Some("Egress promote failed: no config dir".into());
             return;
         };
-        match egress::save_policy_file(&policy, &path) {
+        // Merge (never overwrite): hand edits, comments, and rules for
+        // processes not currently observed all survive the promotion.
+        match egress::merge_rules_into_policy_file(&rules, &path) {
             Ok(()) => {
-                self.egress_profiler.set_policy(Some(policy));
+                // Reload from the file so the effective policy is exactly
+                // what the user would see opening it — merged, not replaced.
+                self.egress_profiler
+                    .set_policy(egress::load_policy_file(&path));
                 self.ui.export_status = Some(format!(
                     "Egress policy promoted: {proc_count} processes → {}",
                     path.display()
                 ));
+            }
+            Err(e) => {
+                self.ui.export_status = Some(format!("Egress promote failed: {e}"));
+            }
+        }
+    }
+
+    /// Promote only the process under the cursor on the Egress tab —
+    /// selective ratification, with a diff of what the promotion adds.
+    fn promote_selected_egress(&mut self) {
+        use crate::collectors::egress;
+        let Some(process) = crate::ui::egress::selected_process(self) else {
+            self.ui.export_status = Some("Egress promote: nothing selected".into());
+            return;
+        };
+        let Some(rule) = self.egress_profiler.promote_one(&process) else {
+            return;
+        };
+        let diff = egress::rule_diff(self.egress_profiler.declared_rule(&process), &rule);
+        let Some(path) = egress::default_policy_path() else {
+            self.ui.export_status = Some("Egress promote failed: no config dir".into());
+            return;
+        };
+        match egress::merge_rules_into_policy_file(&[(process.clone(), rule)], &path) {
+            Ok(()) => {
+                self.egress_profiler
+                    .set_policy(egress::load_policy_file(&path));
+                self.ui.export_status = Some(format!("Promoted {process}: {diff}"));
             }
             Err(e) => {
                 self.ui.export_status = Some(format!("Egress promote failed: {e}"));
@@ -952,6 +990,9 @@ impl App {
                     format!("{} (port {})", v.reason, v.port),
                 );
             }
+            // Persist the learned baseline (rate-limited internally) so it
+            // survives restarts — a 20-minute session isn't a baseline.
+            self.egress_profiler.maybe_persist();
             let interfaces = self.traffic.interfaces();
             self.process_bandwidth.update(&conns, &interfaces);
             update_top_conn_history(&mut self.caches.top_conn_history, &conns);
@@ -1284,6 +1325,7 @@ pub async fn run<B: Backend>(
             AppEvent::Key(key) => {
                 if handle_key(&mut app, key) {
                     app.packet_collector.stop_capture();
+                    app.egress_profiler.persist_now();
                     return Ok(());
                 }
             }
@@ -1453,6 +1495,7 @@ pub async fn run_headless(
 
     // Graceful shutdown: stop capture, then flush whatever is still buffered.
     app.packet_collector.stop_capture();
+    app.egress_profiler.persist_now();
     if let Some(publisher) = remote {
         publisher.shutdown(std::time::Duration::from_secs(8));
     }
@@ -2506,6 +2549,9 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         }
         KeyCode::Char('t') if app.ui.current_tab == Tab::Timeline => {
             app.ui.timeline_window = app.ui.timeline_window.next();
+        }
+        KeyCode::Enter if app.ui.current_tab == Tab::Egress => {
+            app.promote_selected_egress();
         }
         KeyCode::Enter if app.ui.current_tab == Tab::Timeline => {
             let window_secs = app.ui.timeline_window.seconds();

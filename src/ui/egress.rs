@@ -72,22 +72,31 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Flatten profiles → rows, processes alphabetical, destinations by hit
-    // count (descending). Scroll offset indexes into the flattened list
-    // (wheel / arrows via `scroll_tab`, clamped against `dest_count`).
+    // count (descending). `egress_scroll` is the *selected* flat index
+    // (wheel / arrows via `scroll_tab`, clamped against `dest_count`); the
+    // visible window follows the selection, processes-tab style.
     let body_rows = (area.height.saturating_sub(3)) as usize; // borders + header row
-    let offset = app.ui.scroll.egress_scroll;
+    let grand_total = app.egress_profiler.dest_count();
+    let selected = app
+        .ui
+        .scroll
+        .egress_scroll
+        .min(grand_total.saturating_sub(1));
+    let start = (selected + 1).saturating_sub(body_rows);
+    let now = std::time::SystemTime::now();
     let mut rows: Vec<Row> = Vec::new();
     let mut shown = 0usize;
     let mut total = 0usize;
 
     for profile in &profiles {
         let mut dests: Vec<_> = profile.dests.values().collect();
-        dests.sort_by(|a, b| b.count.cmp(&a.count));
+        dests.sort_by_key(|d| std::cmp::Reverse(d.count));
         for dest in dests {
             total += 1;
-            if total <= offset || shown >= body_rows {
+            if total <= start || shown >= body_rows {
                 continue;
             }
+            let is_selected = total - 1 == selected;
             let name = dest
                 .sni
                 .clone()
@@ -99,14 +108,22 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 None => ("—", Style::default().fg(t.text_muted)),
             };
             let asn = dest.asn_org.clone().unwrap_or_default();
-            rows.push(Row::new(vec![
+            let row = Row::new(vec![
                 Cell::from(profile.process.clone()).style(Style::default().fg(t.text_primary)),
                 Cell::from(name).style(Style::default().fg(t.text_primary)),
                 Cell::from(dest.port.to_string()).style(Style::default().fg(t.text_secondary)),
                 Cell::from(asn).style(Style::default().fg(t.text_muted)),
                 Cell::from(dest.count.to_string()).style(Style::default().fg(t.text_secondary)),
+                Cell::from(fmt_age(dest.first_seen, now)).style(Style::default().fg(t.text_muted)),
+                Cell::from(fmt_age(dest.last_seen, now))
+                    .style(Style::default().fg(t.text_secondary)),
                 Cell::from(verdict).style(vstyle),
-            ]));
+            ]);
+            rows.push(if is_selected {
+                row.style(Style::default().bg(t.selection_bg))
+            } else {
+                row
+            });
             shown += 1;
         }
     }
@@ -117,13 +134,15 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
         "Port",
         "ASN org",
         "Seen",
+        "First",
+        "Last",
         "Policy",
     ])
     .style(Style::default().fg(t.key_hint).bold());
 
-    let title = if total > shown || offset > 0 {
-        let first = (offset + 1).min(total);
-        format!(" Egress profiles  ({first}–{} of {total}) ", offset + shown)
+    let title = if total > shown || start > 0 {
+        let first = (start + 1).min(total);
+        format!(" Egress profiles  ({first}–{} of {total}) ", start + shown)
     } else {
         format!(" Egress profiles  ({total}) ")
     };
@@ -131,10 +150,12 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(18),
-            Constraint::Percentage(34),
+            Constraint::Percentage(16),
+            Constraint::Percentage(30),
             Constraint::Length(6),
-            Constraint::Percentage(24),
+            Constraint::Percentage(20),
+            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(6),
             Constraint::Length(8),
         ],
@@ -152,10 +173,12 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let line = Line::from(vec![
+        Span::styled("Enter", Style::default().fg(t.key_hint).bold()),
+        Span::raw(" promote selected process   "),
         Span::styled("Shift+P", Style::default().fg(t.key_hint).bold()),
-        Span::raw(" promote baseline → egress-policy.toml   "),
+        Span::raw(" promote all → egress-policy.toml   "),
         Span::styled("✗ drift", Style::default().fg(t.status_error)),
-        Span::raw(" = flow outside the declared allowlist (warns, never blocks)"),
+        Span::raw(" = outside allowlist (warns, never blocks)"),
     ]);
     let footer = Paragraph::new(line).block(
         Block::default()
@@ -163,4 +186,33 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(t.border)),
     );
     f.render_widget(footer, area);
+}
+
+/// The process owning the selected row — flat index over the same ordering
+/// the table renders (processes alphabetical; any dest row selects its
+/// process, so per-dest ordering within a profile doesn't matter here).
+pub fn selected_process(app: &App) -> Option<String> {
+    let profiles = app.egress_profiler.snapshot();
+    let selected = app.ui.scroll.egress_scroll;
+    let mut idx = 0usize;
+    for profile in &profiles {
+        let n = profile.dests.len();
+        if selected < idx + n {
+            return Some(profile.process.clone());
+        }
+        idx += n;
+    }
+    // Selection clamped past the end (list shrank) → last process.
+    profiles.last().map(|p| p.process.clone())
+}
+
+/// Compact age like `34s`, `5m`, `3h`, `2d`.
+fn fmt_age(t: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    let secs = now.duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
 }

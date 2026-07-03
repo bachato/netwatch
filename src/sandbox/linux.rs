@@ -197,6 +197,11 @@ fn collect_read_write(paths: &SandboxPaths) -> Vec<PathBuf> {
     if let Some(p) = &paths.cache_dir {
         out.push(p.clone());
     }
+    // The learned egress baseline persists here on a rate-limited tick
+    // and at quit — both long after the sandbox is applied.
+    if let Some(p) = &paths.state_dir {
+        out.push(p.clone());
+    }
     if let Some(p) = &paths.cwd {
         // PCAP exports and Flight Recorder bundles land in CWD by
         // default. Locked at startup — see SandboxPaths::from_config.

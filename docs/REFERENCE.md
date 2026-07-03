@@ -165,10 +165,17 @@ The loop is **observe → promote → warn**:
 
 1. **Observe** — the Egress tab (`0`) learns per-process destination profiles:
    SNI (read from the cleartext TLS/QUIC ClientHello — no decryption needed),
-   ASN organization, and port.
-2. **Promote** — `Shift+P` ratifies the observed baseline into
-   `<config_dir>/netwatch/egress-policy.toml` (e.g. `~/.config/netwatch/` on Linux).
-   Review it before trusting it: human ratification is what keeps a compromised
+   ASN organization, and port. The learned baseline **persists across
+   restarts** (`<state_dir>/netwatch/egress-profiles.json`; saved once a
+   minute and at quit) and ages out destinations not seen for 30 days. The
+   `First`/`Last` columns show how long each destination has been known —
+   the evidence you review before promoting.
+2. **Promote** — `Enter` ratifies just the selected process (the status line
+   reports what the promotion adds, e.g. `+2 SNI, +1 ports`); `Shift+P`
+   ratifies everything observed. Both **merge** into
+   `<config_dir>/netwatch/egress-policy.toml` (e.g. `~/.config/netwatch/` on
+   Linux) — hand edits, comments, and rules for other processes survive.
+   Review before trusting: human ratification is what keeps a compromised
    baseline from being blessed as "normal".
 3. **Warn** — flows that fall outside a process's declared allowlist raise a
    `PolicyViolation` alert naming the broken rule. Only processes with a rule are
@@ -298,8 +305,9 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 ### Egress
 | Key | Action |
 |-----|--------|
-| `↑` `↓` | Scroll profiles |
-| `P` | Promote baseline → `egress-policy.toml` |
+| `↑` `↓` | Select / scroll profiles |
+| `Enter` | Promote selected process (merges; status line shows the diff) |
+| `P` | Promote all → `egress-policy.toml` |
 
 ### Settings
 | Key | Action |

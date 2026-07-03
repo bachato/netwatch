@@ -34,6 +34,11 @@ pub struct SandboxPaths {
     /// file dumps land here. Captured eagerly so post-startup `cd`
     /// inside a shell doesn't expand the allow-list.
     pub cwd: Option<PathBuf>,
+    /// `~/.local/state/netwatch/` (Linux) — the learned egress baseline
+    /// (`egress-profiles.json`) persists here on a rate-limited tick and
+    /// at quit, both after the sandbox is applied. Read-only would lose
+    /// the baseline every session.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl SandboxPaths {
@@ -53,6 +58,11 @@ impl SandboxPaths {
 
         let cwd = std::env::current_dir().ok();
 
+        // Derive from the same helper that decides where the baseline is
+        // written, so the sandbox rule can't drift from the writer.
+        let state_dir = crate::collectors::egress::default_profiles_path()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
         Self {
             cache_dir,
             config_dir,
@@ -60,6 +70,7 @@ impl SandboxPaths {
             geoip_asn_db_dir,
             keylog_dir,
             cwd,
+            state_dir,
         }
     }
 }
