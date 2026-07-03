@@ -155,6 +155,39 @@ netwatch_incident_20260403_103501/
   packets.pcap     # present when packets were captured
 ```
 
+### Egress policy linter
+
+A linter for your machine's outbound traffic: declare what each process is *meant* to
+talk to, and NetWatch warns when reality drifts. It warns, it never blocks — the
+read-only invariant holds.
+
+The loop is **observe → promote → warn**:
+
+1. **Observe** — the Egress tab (`0`) learns per-process destination profiles:
+   SNI (read from the cleartext TLS/QUIC ClientHello — no decryption needed),
+   ASN organization, and port.
+2. **Promote** — `Shift+P` ratifies the observed baseline into
+   `<config_dir>/netwatch/egress-policy.toml` (e.g. `~/.config/netwatch/` on Linux).
+   Review it before trusting it: human ratification is what keeps a compromised
+   baseline from being blessed as "normal".
+3. **Warn** — flows that fall outside a process's declared allowlist raise a
+   `PolicyViolation` alert naming the broken rule. Only processes with a rule are
+   checked, so an unlisted process never warns.
+
+```toml
+# egress-policy.toml
+[process.chrome]
+allow_sni   = ["*.google.com", "*.gstatic.com"]   # exact or *.wildcard (incl. apex)
+allow_ports = [443]
+
+[process.node]
+allow_asn = ["CLOUDFLARENET"]                     # fallback when a flow has no SNI
+```
+
+Rules are expressed in terms a firewall can't write — `process → {SNI, ASN, port}` —
+because the flow already carries the owning process (eBPF/proc attribution) and the
+destination name (DPI). Edit the file by hand freely; it reloads on startup.
+
 ### Landlock sandbox (Linux)
 
 Once pcap, PKTAP, and the eBPF kprobe finish setup, NetWatch hands back its elevated
@@ -185,7 +218,8 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 
 | Key | Action |
 |-----|--------|
-| `1`–`9` | Switch tabs (tab `9` Insights appears when AI Insights is enabled) |
+| `1`–`9`, `0` | Switch tabs (tab `9` Insights appears when AI Insights is enabled; `0` Egress) |
+| `P` | Promote observed egress baseline → `egress-policy.toml` |
 | `↑` `↓` | Navigate |
 | `p` | Pause / resume |
 | `r` | Force refresh |
@@ -260,6 +294,12 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 |-----|--------|
 | `↑` `↓` | Navigate |
 | `e` | Export connections to JSON + CSV |
+
+### Egress
+| Key | Action |
+|-----|--------|
+| `↑` `↓` | Scroll profiles |
+| `P` | Promote baseline → `egress-policy.toml` |
 
 ### Settings
 | Key | Action |

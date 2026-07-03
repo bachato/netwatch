@@ -117,7 +117,7 @@ The decrypted application data renders inline. A keylog miss never breaks captur
 
 ## What you get
 
-Nine tabs, switched with `1`–`9`:
+Ten tabs, switched with `1`–`9` and `0`:
 
 | # | Tab | What it shows |
 |---|-----|---------------|
@@ -130,6 +130,7 @@ Nine tabs, switched with `1`–`9`:
 | 7 | **Timeline** | Connection timeline color-coded by TCP state; security alerts land here. |
 | 8 | **Processes** | Per-process bandwidth ranking with live RX/TX and connection counts. |
 | 9 | **Insights** | *(opt-in)* feeds a snapshot to a local/cloud LLM for plain-language analysis. |
+| 0 | **Egress** | Learns what each process talks to (SNI/ASN/port); promote the baseline to a policy and get warned on drift. |
 
 The Packets tab is where the forensics live — deep protocol decoding, live TLS 1.3 decryption, JA4 threat-hunting, Wireshark-style display filters, and incident capture. **[See the full feature reference →](docs/REFERENCE.md)**
 

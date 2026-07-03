@@ -303,6 +303,7 @@ pub enum Tab {
     Timeline,
     Processes,
     Insights,
+    Egress,
 }
 
 use crate::sort::{SortColumn, TabSortState};
@@ -373,6 +374,7 @@ pub struct UiScrollState {
     pub timeline_scroll: usize,
     pub process_scroll: usize,
     pub insights_scroll: usize,
+    pub egress_scroll: usize,
 }
 
 impl Default for UiScrollState {
@@ -389,6 +391,7 @@ impl Default for UiScrollState {
             timeline_scroll: 0,
             process_scroll: 0,
             insights_scroll: 0,
+            egress_scroll: 0,
         }
     }
 }
@@ -1254,6 +1257,7 @@ pub async fn run<B: Backend>(
                 Tab::Timeline => ui::timeline::render(f, &app, area),
                 Tab::Processes => ui::processes::render(f, &app, area),
                 Tab::Insights => ui::insights::render(f, &app, area),
+                Tab::Egress => ui::egress::render(f, &app, area),
             }
             if app.ui.show_help {
                 ui::help::render(f, &app, area);
@@ -1819,6 +1823,10 @@ fn scroll_tab(app: &mut App, delta: isize) {
                 (Some(i), _) => Some(clamp_scroll(i, delta, max)),
             };
         }
+        Tab::Egress => {
+            let max = app.egress_profiler.dest_count().saturating_sub(1);
+            app.ui.scroll.egress_scroll = clamp_scroll(app.ui.scroll.egress_scroll, delta, max);
+        }
         Tab::Dashboard => {}
     }
 }
@@ -2221,6 +2229,7 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('9') if app.user_config.insights_enabled => {
             app.ui.current_tab = Tab::Insights;
         }
+        KeyCode::Char('0') => app.ui.current_tab = Tab::Egress,
         // Stream view controls (intercept before other Packets keys)
         KeyCode::Esc if app.ui.current_tab == Tab::Packets && app.ui.stream_view_open => {
             app.ui.stream_view_open = false;

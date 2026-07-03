@@ -4,6 +4,19 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Egress policy linter (Horizon 3 foundation)** — observe → promote → warn:
+  - **Egress tab** (`0`): per-process destination profiles (SNI / ASN org / port),
+    learned live from the cleartext TLS/QUIC ClientHello — no decryption required.
+    Scrollable, with a policy verdict column (`✓ ok` / `✗ drift`) once a policy is loaded.
+  - **`Shift+P` promote**: ratifies the observed baseline into
+    `<config_dir>/netwatch/egress-policy.toml` (`process → allow_sni / allow_asn /
+    allow_ports`, exact or `*.wildcard` SNI patterns). Review-before-trust — human
+    ratification defeats baseline poisoning.
+  - **`PolicyViolation` alerts**: flows outside a declared allowlist raise a
+    Warning-severity alert naming the broken rule, with a per-flow cooldown. Only
+    processes with a rule are checked; the linter warns, it never blocks.
+
 ## [0.25.9] - 2026-06-27
 
 Deeper protocol decoding, broader threat-detection coverage, and a round of reliability and

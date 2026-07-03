@@ -187,6 +187,17 @@ impl EgressProfiler {
         self.policy.is_some()
     }
 
+    /// Policy verdict for one observed destination, for display: `None` when
+    /// no policy is loaded or the process has no rule (nothing to check),
+    /// `Some(true)` when allowed, `Some(false)` when it drifts.
+    pub fn dest_allowed(&self, process: &str, dest: &EgressDest) -> Option<bool> {
+        let rule = self.policy.as_ref()?.process.get(process)?;
+        Some(
+            rule.violation(dest.sni.as_deref(), dest.asn_org.as_deref(), dest.port)
+                .is_none(),
+        )
+    }
+
     /// Drain the violations detected since the last call.
     pub fn take_violations(&mut self) -> Vec<Violation> {
         std::mem::take(&mut self.pending)

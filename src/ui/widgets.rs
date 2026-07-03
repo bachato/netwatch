@@ -137,6 +137,7 @@ fn visible_tabs(insights_enabled: bool) -> Vec<Tab> {
     if insights_enabled {
         tabs.push(Tab::Insights);
     }
+    tabs.push(Tab::Egress);
     tabs
 }
 
@@ -151,6 +152,7 @@ fn tab_label(tab: Tab) -> (&'static str, &'static str) {
         Tab::Timeline => ("7", "Timeline"),
         Tab::Processes => ("8", "Processes"),
         Tab::Insights => ("9", "Insights"),
+        Tab::Egress => ("0", "Egress"),
     }
 }
 
@@ -382,14 +384,16 @@ mod tests {
                 found_tabs.insert(format!("{:?}", tab));
             }
         }
-        assert_eq!(found_tabs.len(), 8);
+        assert_eq!(found_tabs.len(), 9);
     }
 
     #[test]
     fn insights_tab_reachable_when_enabled() {
         let col = find_first_col(Tab::Insights, true);
         assert!(col.is_some(), "Insights must be reachable when enabled");
-        assert!(tab_at_column(col.unwrap(), false).is_none());
+        // With Insights disabled the tabs shift left, so that column may now
+        // hit Egress — it just must not still resolve to Insights.
+        assert_ne!(tab_at_column(col.unwrap(), false), Some(Tab::Insights));
     }
 
     #[test]

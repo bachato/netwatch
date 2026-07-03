@@ -94,8 +94,8 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line(theme, "Ctrl+C", "Quit"));
     lines.push(key_line(
         theme,
-        "1-8",
-        "Switch tab (Dash/Conn/Iface/Pkt/Stats/Topo/Time/Proc)",
+        "1-9, 0",
+        "Switch tab (Dash/Conn/Iface/Pkt/Stats/Topo/Time/Proc/Insights/Egress)",
     ));
     lines.push(key_line(theme, "p", "Pause/resume data collection"));
     lines.push(key_line(theme, "r", "Force refresh all data"));
