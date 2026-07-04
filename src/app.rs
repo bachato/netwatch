@@ -499,7 +499,10 @@ impl App {
         let capture_interface = if !user_config.capture_interface.is_empty() {
             user_config.capture_interface.clone()
         } else {
-            Self::pick_capture_interface(&interface_info)
+            Self::pick_capture_interface(
+                &interface_info,
+                platform::default_route_interface().as_deref(),
+            )
         };
 
         // Apply BPF filter from config
@@ -717,13 +720,26 @@ impl App {
         }
     }
 
-    fn pick_capture_interface(info: &[InterfaceInfo]) -> String {
-        // Prefer UP interfaces with an IPv4 address, skip loopback
+    fn is_loopback_name(name: &str) -> bool {
+        name == "lo" || name == "lo0"
+    }
+
+    fn pick_capture_interface(info: &[InterfaceInfo], default_route_dev: Option<&str>) -> String {
+        // Prefer the interface carrying the default route: on multi-NIC
+        // machines enumeration order says nothing about which port has the
+        // cable, so "first UP with an IPv4" can land on the idle port
+        // (issue #43). Fall back to UP-with-IPv4, then any UP, skipping
+        // loopback throughout.
+        if let Some(dev) = default_route_dev {
+            if info.iter().any(|i| i.name == dev && i.is_up) {
+                return dev.to_string();
+            }
+        }
         info.iter()
-            .find(|i| i.is_up && i.ipv4.is_some() && i.name != "lo0" && i.name != "lo")
+            .find(|i| i.is_up && i.ipv4.is_some() && !Self::is_loopback_name(&i.name))
             .or_else(|| {
                 info.iter()
-                    .find(|i| i.is_up && i.name != "lo0" && i.name != "lo")
+                    .find(|i| i.is_up && !Self::is_loopback_name(&i.name))
             })
             .map(|i| i.name.clone())
             .unwrap_or_else(|| "en0".to_string())
@@ -732,7 +748,7 @@ impl App {
     fn capturable_interfaces(&self) -> Vec<String> {
         self.interface_info
             .iter()
-            .filter(|i| i.is_up)
+            .filter(|i| i.is_up && !Self::is_loopback_name(&i.name))
             .map(|i| i.name.clone())
             .collect()
     }
@@ -2374,8 +2390,18 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             }
         }
         KeyCode::Char('i') if app.ui.current_tab == Tab::Packets => {
-            if !app.packet_collector.is_capturing() {
-                app.cycle_capture_interface();
+            // Cycling while capturing restarts the capture on the new
+            // interface (keeping the buffer and BPF filter) — a silent
+            // no-op here left users stuck on the wrong NIC (issue #43).
+            let was_capturing = app.packet_collector.is_capturing();
+            if was_capturing {
+                app.packet_collector.stop_capture();
+            }
+            app.cycle_capture_interface();
+            if was_capturing {
+                let iface = app.capture_interface.clone();
+                let bpf = app.bpf_filter_active.clone();
+                app.packet_collector.start_capture(&iface, bpf.as_deref());
             }
         }
         KeyCode::Char('x') if app.ui.current_tab == Tab::Packets => {
@@ -3505,5 +3531,62 @@ mod tests {
         assert_eq!(order.len(), order_len_before);
         assert_eq!(history.len(), MAX_RTT_HISTORY_IPS);
         assert!(history.contains_key("10.0.0.0"));
+    }
+
+    fn net_iface(name: &str, is_up: bool, ipv4: Option<&str>) -> InterfaceInfo {
+        InterfaceInfo {
+            name: name.into(),
+            ipv4: ipv4.map(|s| s.to_string()),
+            ipv6: None,
+            mac: None,
+            mtu: None,
+            is_up,
+            is_wireless: None,
+        }
+    }
+
+    #[test]
+    fn pick_capture_prefers_default_route_dev() {
+        // Dual-NIC board (issue #43): eno1 enumerates first and has an
+        // address, but the default route runs over eno2.
+        let info = vec![
+            net_iface("lo", true, Some("127.0.0.1")),
+            net_iface("eno1", true, Some("192.168.5.2")),
+            net_iface("eno2", true, Some("192.168.1.50")),
+        ];
+        assert_eq!(App::pick_capture_interface(&info, Some("eno2")), "eno2");
+    }
+
+    #[test]
+    fn pick_capture_ignores_default_route_dev_that_is_down_or_unknown() {
+        let info = vec![
+            net_iface("lo", true, Some("127.0.0.1")),
+            net_iface("eno1", true, Some("192.168.5.2")),
+            net_iface("eno2", false, None),
+        ];
+        // Route dev is down (stale route) → fall back to first UP w/ IPv4.
+        assert_eq!(App::pick_capture_interface(&info, Some("eno2")), "eno1");
+        // Route dev isn't in the interface list at all.
+        assert_eq!(App::pick_capture_interface(&info, Some("wg0")), "eno1");
+    }
+
+    #[test]
+    fn pick_capture_falls_back_without_route_info() {
+        let info = vec![
+            net_iface("lo", true, Some("127.0.0.1")),
+            net_iface("eno1", false, None),
+            net_iface("eno2", true, Some("192.168.1.50")),
+        ];
+        assert_eq!(App::pick_capture_interface(&info, None), "eno2");
+    }
+
+    #[test]
+    fn pick_capture_skips_loopback_even_as_last_resort() {
+        let info = vec![
+            net_iface("lo", true, Some("127.0.0.1")),
+            net_iface("eno1", true, None),
+        ];
+        // No UP interface with IPv4 (besides lo) → any UP non-loopback.
+        assert_eq!(App::pick_capture_interface(&info, None), "eno1");
     }
 }

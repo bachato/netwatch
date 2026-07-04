@@ -1446,6 +1446,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Span::styled("c", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(format!(":{capture_key}  ")),
+            Span::styled("i", Style::default().fg(app.theme.key_hint).bold()),
+            Span::raw(":Iface  "),
             Span::styled("/", Style::default().fg(app.theme.key_hint).bold()),
             Span::raw(":Filter  "),
             Span::styled("s", Style::default().fg(app.theme.key_hint).bold()),

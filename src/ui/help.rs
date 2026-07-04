@@ -192,7 +192,7 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line(
         theme,
         "i",
-        "Cycle capture interface (when stopped)",
+        "Cycle capture interface (restarts capture if running)",
     ));
     lines.push(key_line(theme, "/", "Open display filter bar"));
     lines.push(key_line(theme, "Esc", "Clear display filter"));

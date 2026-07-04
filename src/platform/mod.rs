@@ -52,6 +52,21 @@ pub fn collect_interface_stats() -> Result<HashMap<String, InterfaceStats>> {
     anyhow::bail!("Unsupported platform")
 }
 
+/// Name of the interface carrying the default route, if the platform can
+/// tell us. Used to bias capture-interface selection toward the NIC that
+/// actually carries traffic — on multi-NIC machines enumeration order says
+/// nothing about which port has the cable (issue #43).
+pub fn default_route_interface() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return linux::default_route_interface();
+
+    #[cfg(target_os = "macos")]
+    return macos::default_route_interface();
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    None
+}
+
 pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
     #[cfg(target_os = "linux")]
     return linux::collect_interface_info();

@@ -168,6 +168,25 @@ fn parse_hardware_ports(text: &str, map: &mut HashMap<String, bool>) {
     }
 }
 
+/// Name of the interface carrying the default route, if any.
+pub fn default_route_interface() -> Option<String> {
+    let output = Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
+    parse_route_get_interface(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_route_get_interface(text: &str) -> Option<String> {
+    // `route -n get default` output includes a line like "  interface: en0"
+    text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("interface:")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +373,27 @@ VLAN Configurations
         let mut map = HashMap::new();
         parse_hardware_ports(text, &mut map);
         assert_eq!(map.get("en1"), Some(&true));
+    }
+
+    #[test]
+    fn parse_route_get_interface_typical() {
+        let out = "\
+   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.1.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+";
+        assert_eq!(parse_route_get_interface(out).as_deref(), Some("en0"));
+    }
+
+    #[test]
+    fn parse_route_get_interface_none_when_absent() {
+        assert_eq!(parse_route_get_interface(""), None);
+        assert_eq!(
+            parse_route_get_interface("route: writing to routing socket: not in table\n"),
+            None
+        );
     }
 }
