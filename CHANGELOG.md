@@ -4,6 +4,13 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-04
+
+The **egress policy linter** (Horizon 3): NetWatch learns what each process on your
+machine normally talks to, lets you ratify that baseline into a policy, and warns when
+traffic drifts from it — observe → promote → warn. It warns, it never blocks. SNI is read
+from the cleartext ClientHello, so meaningful policy works without decryption or a keylog.
+
 ### Fixed
 - **Promoted processes now all read `✓ ok` — a rule admits its own baseline.**
   A process with a mix of named and nameless (raw-IP) destinations got a
