@@ -4,6 +4,21 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-07-04
+
+### Fixed
+- **Packet capture now defaults to the NIC carrying the default route.** (#43)
+  On multi-NIC machines (e.g. motherboards with two Ethernet ports) the capture
+  tab picked the first UP interface with an IPv4 in enumeration order, which
+  could be the idle port. The interface with the default route is now preferred,
+  with the old heuristic as fallback.
+- **`i` (cycle capture interface) now works while capturing** — it restarts the
+  capture on the new interface, keeping the packet buffer and active BPF filter.
+  Previously it silently did nothing until you stopped capture with `c`. The
+  Packets footer now advertises the key (`i:Iface`).
+- Loopback is no longer offered when cycling capture interfaces (still
+  selectable via the `capture_interface` config key).
+
 ## [0.26.0] - 2026-07-04
 
 The **egress policy linter** (Horizon 3): NetWatch learns what each process on your
