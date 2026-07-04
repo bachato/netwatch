@@ -1,6 +1,12 @@
 # Plan: Horizon 3 — egress policy linter (observe → promote → warn)
 
 **Drafted:** 2026-07-04
+**Status (2026-07-04):** Phases 0–2 ✅ implemented on `feat/h3-egress-linter`
+(commits `bedd447` foundation, `777cb22` tab, `38a83bb` Phase 1, `1ea0d75`
+Phase 2), all unreleased — ships together as **v0.26.0** once the live check
+passes. Deferred within Phase 2: violations pane / alert→flow jump / per-rule
+snooze (ergonomics beyond the configurable cooldown). Phase 3 remains gated
+on the launch decision.
 **Context:** ROADMAP.md Horizon 3. Foundation already exists on `feat/h3-egress-linter`
 (commit `bedd447`, unreleased): `collectors/egress.rs` EgressProfiler joins
 process + SNI + ASN + port into per-process profiles; `Shift+P` promotes the
