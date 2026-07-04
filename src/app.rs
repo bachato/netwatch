@@ -2519,6 +2519,21 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.ui.connection_filter_text.clear();
             app.ui.scroll.connection_scroll = 0;
         }
+        KeyCode::Char('e') if app.ui.current_tab == Tab::Egress => {
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let path = std::path::PathBuf::from(format!("{home}/netwatch_egress_{ts}.ndjson"));
+            match app.egress_profiler.export_ndjson(&path) {
+                Ok(n) => {
+                    app.ui.export_status =
+                        Some(format!("Exported {n} egress records → {}", path.display()));
+                }
+                Err(e) => {
+                    app.ui.export_status = Some(format!("Egress export failed: {e}"));
+                }
+            }
+            app.ui.export_status_tick = 0;
+        }
         KeyCode::Char('e')
             if app.ui.current_tab == Tab::Connections || app.ui.current_tab == Tab::Processes =>
         {

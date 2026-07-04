@@ -36,6 +36,10 @@ const VIOLATION_COOLDOWN_SECS: u64 = 300;
 const STALE_DEST_SECS: u64 = 30 * 24 * 3600;
 /// Write the learned baseline to disk at most this often (plus once at quit).
 const PERSIST_INTERVAL_SECS: u64 = 60;
+/// Schema tag stamped on the NDJSON export's `_meta` line. Bump the minor
+/// when adding fields (additive/back-compatible), the major on a breaking
+/// change — the managed ingest keys off this.
+pub const EGRESS_EXPORT_SCHEMA: &str = "netwatch.egress.v1";
 
 /// One observed destination for a process.
 #[derive(Clone, Debug)]
@@ -71,6 +75,29 @@ pub struct EgressProfile {
     pub process: String,
     pub dests: HashMap<DestKey, EgressDest>,
     pub last_seen: SystemTime,
+}
+
+/// One attributed egress flow-summary plus its policy verdict — the unit of
+/// the structured export (`netwatch.egress.v1`). Metadata only; no payload.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EgressRecord {
+    pub process: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asn_org: Option<String>,
+    pub port: u16,
+    /// Coarse L7 class: `tls` when a ClientHello named the destination,
+    /// else `other`. Kept coarse on purpose — no payload inspection.
+    pub proto: String,
+    pub ech: bool,
+    /// Unix seconds.
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub count: u64,
+    /// Policy verdict at export time: `ok` | `drift` | `unreadable` (ECH,
+    /// name hidden) | `unchecked` (no rule for this process).
+    pub verdict: String,
 }
 
 /// A flow that violated a declared egress rule. Surfaced as a warning —
@@ -425,6 +452,73 @@ impl EgressProfiler {
         let mut out: Vec<EgressProfile> = self.profiles.values().cloned().collect();
         out.sort_by(|a, b| a.process.cmp(&b.process));
         out
+    }
+
+    // ── Structured export (the cloud-ingest seam) ───────────────────────
+
+    /// One exported egress record: an attributed flow-summary plus the
+    /// current policy verdict. This is the schema the managed layer ingests
+    /// — the seam between the OSS linter and the product. Versioned via the
+    /// leading `_meta` line the NDJSON writer emits.
+    ///
+    /// Deliberately the same fields the tab shows; no raw payload, ever —
+    /// metadata-only is the whole point of the redaction posture.
+    pub fn export_records(&self) -> Vec<EgressRecord> {
+        let mut out = Vec::new();
+        for profile in self.snapshot() {
+            for dest in profile.dests.values() {
+                let verdict = match self.dest_allowed(&profile.process, dest) {
+                    Some(true) => "ok",
+                    Some(false) if dest.ech && dest.sni.is_none() => "unreadable",
+                    Some(false) => "drift",
+                    None => "unchecked",
+                }
+                .to_string();
+                out.push(EgressRecord {
+                    process: profile.process.clone(),
+                    sni: dest.sni.clone(),
+                    asn_org: dest.asn_org.clone(),
+                    port: dest.port,
+                    proto: if dest.sni.is_some() { "tls" } else { "other" }.to_string(),
+                    ech: dest.ech,
+                    first_seen: unix_secs(dest.first_seen),
+                    last_seen: unix_secs(dest.last_seen),
+                    count: dest.count,
+                    verdict,
+                });
+            }
+        }
+        // Stable order (process, then destination label) so a diff of two
+        // exports is meaningful.
+        out.sort_by(|a, b| {
+            a.process
+                .cmp(&b.process)
+                .then_with(|| a.sni.cmp(&b.sni))
+                .then_with(|| a.port.cmp(&b.port))
+        });
+        out
+    }
+
+    /// Write the attributed egress records as NDJSON: one JSON object per
+    /// line, preceded by a `_meta` line naming the schema version. NDJSON so
+    /// the managed collector can stream-parse it line-by-line. Returns the
+    /// number of flow records written (excludes the meta line).
+    pub fn export_ndjson(&self, path: &Path) -> std::io::Result<usize> {
+        use std::io::Write as _;
+        let records = self.export_records();
+        let file = std::fs::File::create(path)?;
+        let mut w = std::io::BufWriter::new(file);
+        let meta = serde_json::json!({
+            "_meta": { "schema": EGRESS_EXPORT_SCHEMA, "records": records.len() }
+        });
+        writeln!(w, "{meta}")?;
+        for rec in &records {
+            let line = serde_json::to_string(rec)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            writeln!(w, "{line}")?;
+        }
+        w.flush()?;
+        Ok(records.len())
     }
 
     // ── Baseline persistence ────────────────────────────────────────────
@@ -1476,6 +1570,89 @@ mod tests {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load_policy_file(&path).is_some(), "0644 loads fine");
+    }
+
+    // ── Phase 3: structured export ──
+
+    #[test]
+    fn export_records_carry_verdicts_and_sort_stably() {
+        let mut p = EgressProfiler::new();
+        let now = SystemTime::now();
+        p.record("chrome", "1.1.1.1", 443, sni("a.google.com"), None, now);
+        p.record("curl", "9.9.9.9", 443, None, Some("Quad9".into()), now);
+        let mut policy = EgressPolicy::default();
+        policy.process.insert(
+            "chrome".into(),
+            ProcessRule {
+                allow_sni: vec!["a.google.com".into()],
+                ..Default::default()
+            },
+        );
+        p.set_policy(Some(policy));
+
+        let recs = p.export_records();
+        assert_eq!(recs.len(), 2);
+        // Sorted by process: chrome, curl.
+        assert_eq!(recs[0].process, "chrome");
+        assert_eq!(recs[0].verdict, "ok"); // matches its rule
+        assert_eq!(recs[0].proto, "tls");
+        assert_eq!(recs[1].process, "curl");
+        assert_eq!(recs[1].verdict, "unchecked"); // no rule for curl
+        assert_eq!(recs[1].asn_org.as_deref(), Some("Quad9"));
+        assert_eq!(recs[1].proto, "other");
+    }
+
+    #[test]
+    fn ech_flow_exports_as_unreadable_not_drift() {
+        let mut p = EgressProfiler::new();
+        p.record_flow(
+            "app",
+            "1.2.3.4",
+            443,
+            None,
+            Some("Cloudflare".into()),
+            true,
+            SystemTime::now(),
+        );
+        let mut policy = EgressPolicy::default();
+        policy.process.insert(
+            "app".into(),
+            ProcessRule {
+                allow_sni: vec!["api.example.com".into()],
+                ..Default::default()
+            },
+        );
+        p.set_policy(Some(policy));
+        let recs = p.export_records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].verdict, "unreadable");
+        assert!(recs[0].ech);
+    }
+
+    #[test]
+    fn export_ndjson_has_meta_header_then_one_line_per_record() {
+        let path = scratch("export.ndjson");
+        let mut p = EgressProfiler::new();
+        let now = SystemTime::now();
+        p.record("chrome", "1.1.1.1", 443, sni("a.google.com"), None, now);
+        p.record("chrome", "1.1.1.2", 443, sni("b.google.com"), None, now);
+
+        let n = p.export_ndjson(&path).unwrap();
+        assert_eq!(n, 2);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3, "meta line + 2 records");
+
+        // Meta line names the schema and count.
+        let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(meta["_meta"]["schema"], EGRESS_EXPORT_SCHEMA);
+        assert_eq!(meta["_meta"]["records"], 2);
+
+        // Each subsequent line is a standalone EgressRecord.
+        let rec: EgressRecord = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(rec.process, "chrome");
+        // No payload field ever leaks into the export.
+        assert!(!lines[1].contains("payload") && !lines[1].contains("raw"));
     }
 
     #[test]

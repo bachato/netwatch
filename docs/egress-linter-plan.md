@@ -1,12 +1,14 @@
 # Plan: Horizon 3 — egress policy linter (observe → promote → warn)
 
 **Drafted:** 2026-07-04
-**Status (2026-07-04):** Phases 0–2 ✅ implemented on `feat/h3-egress-linter`
-(commits `bedd447` foundation, `777cb22` tab, `38a83bb` Phase 1, `1ea0d75`
-Phase 2), all unreleased — ships together as **v0.26.0** once the live check
-passes. Deferred within Phase 2: violations pane / alert→flow jump / per-rule
-snooze (ergonomics beyond the configurable cooldown). Phase 3 remains gated
-on the launch decision.
+**Status (2026-07-04):** Phases 0–2 ✅ and **Phase 3 step 1 (OSS export) ✅**
+implemented on `feat/h3-egress-linter` (commits `bedd447` foundation, `777cb22`
+tab, `38a83bb` Phase 1, `1ea0d75` Phase 2, + NDJSON export), all unreleased —
+ships together as **v0.26.0** once the live check passes. Deferred within
+Phase 2: violations pane / alert→flow jump / per-rule snooze (ergonomics beyond
+the configurable cooldown). Phase 3 steps 2–3 (agent parity, cloud ingest)
+remain **gated on the launch decision** — the export contract should be pulled
+by a launchable product, not pushed ahead of one.
 **Context:** ROADMAP.md Horizon 3. Foundation already exists on `feat/h3-egress-linter`
 (commit `bedd447`, unreleased): `collectors/egress.rs` EgressProfiler joins
 process + SNI + ASN + port into per-process profiles; `Shift+P` promotes the
@@ -98,17 +100,20 @@ Drift warnings are only valuable if people leave them on.
 
 Where OSS linting becomes the product's ingest contract.
 
-1. **Structured egress export.** NDJSON event stream of attributed flows +
-   violations (extend `collectors/packets/pcap_export.rs` / `remote.rs`):
-   `{ts, process, pid, sni, asn, port, proto, policy: {rule, verdict}}`.
-   Versioned schema — this is the contract netwatch-cloud ingests.
-2. **Agent parity.** Lift `EgressProfiler` into netwatch-sdk (or netwatch-dpi)
-   so `netwatch-agent` runs the same observe loop and ships profiles +
-   violations to the cloud. One implementation, two consumers.
-3. **policy.toml as the second seam.** Same file the TUI lints with, the cloud
-   can distribute and (later, managed layer) enforce. Cloud work itself —
-   fleet drift view, central promote — lives in the netwatch-cloud repo and is
-   **gated on the launch decision**, not on this plan.
+1. **Structured egress export.** ✅ **Done (OSS side)** on
+   `feat/h3-egress-linter`: `EgressProfiler::export_ndjson` writes versioned
+   NDJSON (`netwatch.egress.v1`) — a `_meta` schema line then one metadata-only
+   `EgressRecord` per line (process, SNI, ASN, port, proto, ECH, first/last-seen,
+   count, policy verdict). Bound to `e` on the Egress tab. No payload, ever.
+   This is the contract the managed layer ingests.
+2. **Agent parity.** ⛔ **Gated on launch decision.** Lift `EgressProfiler`
+   into netwatch-sdk (or netwatch-dpi) so `netwatch-agent` runs the same observe
+   loop and ships records to the cloud. One implementation, two consumers.
+   Don't build ahead of a launchable product.
+3. **policy.toml as the second seam.** ⛔ **Gated.** Same file the TUI lints
+   with, the cloud can distribute and (later, managed layer) enforce. Cloud work
+   itself — fleet drift view, central promote — lives in the netwatch-cloud repo
+   and is gated on the launch decision, not on this plan.
 
 ## Phase 4 — Fleet/product layer — v0.31+ / cloud repo
 

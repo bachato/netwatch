@@ -39,6 +39,10 @@ All notable changes to NetWatch will be documented in this file.
     per-flow re-warn interval.
   - **Hardening**: a group/world-writable `egress-policy.toml` is refused with
     a loud warning — the policy file is a trust anchor.
+  - **Structured export** (`e` on the Egress tab): writes attributed egress
+    records as versioned NDJSON (`netwatch.egress.v1`) — one metadata-only JSON
+    object per line (process, SNI, ASN, port, proto, ECH, first/last-seen,
+    count, policy verdict), preceded by a `_meta` schema line. No payload ever.
 
 ## [0.25.9] - 2026-06-27
 

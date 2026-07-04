@@ -196,6 +196,19 @@ Sharp edges handled for you:
   with a loud log warning. If anyone but the owner can edit the policy, "warn on
   drift" could be silenced by the very thing drifting. `chmod 644` or stricter.
 
+**Structured export.** Press `e` on the Egress tab to write the attributed
+records as **NDJSON** (`netwatch.egress.v1`) — one JSON object per line, preceded
+by a `_meta` line naming the schema. Each record is metadata only (process, SNI,
+ASN org, port, coarse proto, ECH flag, first/last-seen, count, policy verdict) —
+never any payload. This is the ingest contract the managed layer consumes; the
+same `policy.toml` the TUI lints with is the file a managed layer would
+distribute.
+
+```json
+{"_meta":{"schema":"netwatch.egress.v1","records":2}}
+{"process":"chrome","sni":"mail.google.com","asn_org":"Google LLC","port":443,"proto":"tls","ech":false,"first_seen":1751600000,"last_seen":1751603600,"count":42,"verdict":"ok"}
+```
+
 ```toml
 # egress-policy.toml
 [process.chrome]
@@ -323,6 +336,7 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 | `↑` `↓` | Select / scroll profiles |
 | `Enter` | Promote selected process (merges; status line shows the diff) |
 | `P` | Promote all → `egress-policy.toml` |
+| `e` | Export attributed egress records → `~/netwatch_egress_<ts>.ndjson` |
 
 ### Settings
 | Key | Action |

@@ -184,7 +184,9 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Enter", Style::default().fg(t.key_hint).bold()),
         Span::raw(" promote selected process   "),
         Span::styled("Shift+P", Style::default().fg(t.key_hint).bold()),
-        Span::raw(" promote all → egress-policy.toml   "),
+        Span::raw(" promote all   "),
+        Span::styled("e", Style::default().fg(t.key_hint).bold()),
+        Span::raw(" export NDJSON   "),
         Span::styled("✗ drift", Style::default().fg(t.status_error)),
         Span::raw(" = outside allowlist (warns, never blocks)"),
     ]);
