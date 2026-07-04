@@ -5,6 +5,12 @@ All notable changes to NetWatch will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Egress promote is now additive — it accumulates the full allowlist.**
+  Promotion replaced a process's rule with only what was observed in the
+  current session, so re-promoting (or promote-all after some destinations had
+  aged out of the live baseline) could *shrink* the list. Promotion now unions
+  the observed entries with those already in the file — prior promotes and
+  hand-added entries both survive; ratification only ever grows the allowlist.
 - **Egress promote now reliably takes effect.** A freshly-promoted
   `egress-policy.toml` written under a loose umask could be group/world-writable,
   which the policy loader then refused — so the promote appeared to do nothing

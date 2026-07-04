@@ -927,10 +927,41 @@ const POLICY_HEADER: &str = "# netwatch egress policy (observe → promote → w
                              # Generated from the observed baseline; review before trusting.\n\
                              # The linter WARNS on drift — it never blocks.\n\n";
 
+/// Union the string entries already declared under `key` in an existing
+/// TOML process table with the newly-promoted ones. Deduped, sorted, stable.
+fn union_strings(existing: Option<&toml_edit::Item>, key: &str, add: &[String]) -> Vec<String> {
+    let mut set: BTreeSet<String> = add.iter().cloned().collect();
+    if let Some(arr) = existing.and_then(|e| e.get(key)).and_then(|v| v.as_array()) {
+        for v in arr.iter() {
+            if let Some(s) = v.as_str() {
+                set.insert(s.to_string());
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Port variant of `union_strings`.
+fn union_ports(existing: Option<&toml_edit::Item>, key: &str, add: &[u16]) -> Vec<u16> {
+    let mut set: BTreeSet<u16> = add.iter().copied().collect();
+    if let Some(arr) = existing.and_then(|e| e.get(key)).and_then(|v| v.as_array()) {
+        for v in arr.iter() {
+            if let Some(n) = v.as_integer() {
+                if let Ok(p) = u16::try_from(n) {
+                    set.insert(p);
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// Upsert `rules` into the policy file, preserving everything else — hand
 /// edits, comments, and rules for processes not being promoted. Promotion
-/// merges; it never deletes. Refuses (rather than clobbers) a file that no
-/// longer parses, so a broken hand edit is never silently thrown away.
+/// is additive per process: it unions the observed entries with those already
+/// declared (it never shrinks or deletes an allowlist). Refuses (rather than
+/// clobbers) a file that no longer parses, so a broken hand edit is never
+/// silently thrown away.
 pub fn merge_rules_into_policy_file(
     rules: &[(String, ProcessRule)],
     path: &Path,
@@ -953,22 +984,37 @@ pub fn merge_rules_into_policy_file(
         t.set_implicit(true);
     }
     for (name, rule) in rules {
+        // Promote is *additive*: union the newly-observed entries with
+        // whatever the file already declares for this process — prior
+        // promotes that have since aged out of the live baseline, and any
+        // hand-added entries. Replacing would shrink the allowlist to just
+        // what's observed this session (the "not updating the full list"
+        // bug); ratification only ever grows it. Removal stays a manual edit.
+        let existing = doc["process"].get(name.as_str());
+        let sni = union_strings(existing, "allow_sni", &rule.allow_sni);
+        let asn = union_strings(existing, "allow_asn", &rule.allow_asn);
+        let ports = union_ports(existing, "allow_ports", &rule.allow_ports);
+
         let mut t = toml_edit::Table::new();
         // Wildcard suggestions land as a comment above the rule — visible
         // exactly where the human reviews, applied only by their hand.
-        let suggestions = wildcard_suggestions(rule);
+        // Computed on the *unioned* set so the suggestion reflects the file.
+        let unioned = ProcessRule {
+            allow_sni: sni.clone(),
+            allow_asn: asn.clone(),
+            allow_ports: ports.clone(),
+        };
+        let suggestions = wildcard_suggestions(&unioned);
         if !suggestions.is_empty() {
             t.decor_mut()
                 .set_prefix(format!("# suggestion: {}\n", suggestions.join("; ")));
         }
-        t["allow_sni"] = toml_edit::value(toml_edit::Array::from_iter(
-            rule.allow_sni.iter().map(String::as_str),
-        ));
-        t["allow_asn"] = toml_edit::value(toml_edit::Array::from_iter(
-            rule.allow_asn.iter().map(String::as_str),
-        ));
+        t["allow_sni"] =
+            toml_edit::value(toml_edit::Array::from_iter(sni.iter().map(String::as_str)));
+        t["allow_asn"] =
+            toml_edit::value(toml_edit::Array::from_iter(asn.iter().map(String::as_str)));
         t["allow_ports"] = toml_edit::value(toml_edit::Array::from_iter(
-            rule.allow_ports.iter().map(|p| i64::from(*p)),
+            ports.iter().map(|p| i64::from(*p)),
         ));
         doc["process"][name.as_str()] = toml_edit::Item::Table(t);
     }
@@ -1775,6 +1821,78 @@ mod tests {
             "a loose pre-existing file is tightened on write"
         );
         assert!(load_policy_file(&path).is_some());
+    }
+
+    #[test]
+    fn promote_is_additive_and_never_shrinks_the_allowlist() {
+        let path = scratch("additive.toml");
+
+        // First promote: chrome observed talking to google.
+        merge_rules_into_policy_file(
+            &[(
+                "chrome".to_string(),
+                ProcessRule {
+                    allow_sni: vec!["mail.google.com".into()],
+                    allow_ports: vec![443],
+                    ..Default::default()
+                },
+            )],
+            &path,
+        )
+        .unwrap();
+
+        // Second promote: a *different* observed set (e.g. a new session where
+        // the old destination wasn't seen). Must UNION, not replace.
+        merge_rules_into_policy_file(
+            &[(
+                "chrome".to_string(),
+                ProcessRule {
+                    allow_sni: vec!["drive.google.com".into()],
+                    allow_ports: vec![443],
+                    ..Default::default()
+                },
+            )],
+            &path,
+        )
+        .unwrap();
+
+        let policy = load_policy_file(&path).unwrap();
+        let sni = &policy.process.get("chrome").unwrap().allow_sni;
+        assert!(
+            sni.contains(&"mail.google.com".to_string())
+                && sni.contains(&"drive.google.com".to_string()),
+            "promote must accumulate both destinations, got {sni:?}"
+        );
+    }
+
+    #[test]
+    fn promote_preserves_hand_added_entries() {
+        let path = scratch("handadd.toml");
+        // User hand-curated an entry the baseline never observed.
+        std::fs::write(
+            &path,
+            "[process.node]\nallow_sni = [\"internal.corp\"]\nallow_ports = [443]\n",
+        )
+        .unwrap();
+        merge_rules_into_policy_file(
+            &[(
+                "node".to_string(),
+                ProcessRule {
+                    allow_sni: vec!["api.stripe.com".into()],
+                    allow_ports: vec![443],
+                    ..Default::default()
+                },
+            )],
+            &path,
+        )
+        .unwrap();
+        let policy = load_policy_file(&path).unwrap();
+        let sni = &policy.process.get("node").unwrap().allow_sni;
+        assert!(
+            sni.contains(&"internal.corp".to_string()),
+            "hand-added entry must survive promote, got {sni:?}"
+        );
+        assert!(sni.contains(&"api.stripe.com".to_string()));
     }
 
     #[test]
