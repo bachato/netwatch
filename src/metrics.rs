@@ -61,6 +61,10 @@ pub struct MetricsSnapshot {
     pub connection_count: u64,
     pub tcp_time_wait: u64,
     pub tcp_close_wait: u64,
+    /// Cumulative egress-policy violations per process (post-cooldown, so it
+    /// tracks the alert stream). Low-cardinality by construction: only
+    /// processes with a declared rule in `egress-policy.toml` can appear.
+    pub policy_violations: Vec<(String, u64)>,
 }
 
 pub struct MetricsExporter {
@@ -85,6 +89,7 @@ impl MetricsExporter {
         interfaces: &[InterfaceTraffic],
         health: &HealthProber,
         connections: &ConnectionCollector,
+        policy_violations: Vec<(String, u64)>,
     ) {
         let ifaces = interfaces
             .iter()
@@ -123,6 +128,7 @@ impl MetricsExporter {
             connection_count: conns.len() as u64,
             tcp_time_wait: time_wait,
             tcp_close_wait: close_wait,
+            policy_violations,
         };
 
         *safe_lock(&self.snapshot, "metrics::update") = Some(snap);
@@ -397,6 +403,22 @@ pub fn render_prometheus(snap: Option<&MetricsSnapshot>, collectors_ok: bool) ->
         s.tcp_close_wait
     );
 
+    // --- Egress policy linter --------------------------------------------
+    if !s.policy_violations.is_empty() {
+        o.push_str(
+            "# HELP netwatch_policy_violations_total Egress policy violations detected per process (post-cooldown; observe → promote → warn).\n",
+        );
+        o.push_str("# TYPE netwatch_policy_violations_total counter\n");
+        for (process, count) in &s.policy_violations {
+            let _ = writeln!(
+                o,
+                "netwatch_policy_violations_total{{process=\"{}\"}} {}",
+                escape_label(process),
+                count
+            );
+        }
+    }
+
     o
 }
 
@@ -426,7 +448,15 @@ mod tests {
             connection_count: 7,
             tcp_time_wait: 3,
             tcp_close_wait: 1,
+            policy_violations: vec![("curl".into(), 2)],
         }
+    }
+
+    #[test]
+    fn renders_policy_violation_counter_per_process() {
+        let out = render_prometheus(Some(&sample()), true);
+        assert!(out.contains("# TYPE netwatch_policy_violations_total counter"));
+        assert!(out.contains("netwatch_policy_violations_total{process=\"curl\"} 2"));
     }
 
     #[test]

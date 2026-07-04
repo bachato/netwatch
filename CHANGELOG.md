@@ -25,6 +25,20 @@ All notable changes to NetWatch will be documented in this file.
     `egress-policy.toml` via `toml_edit` — hand edits, comments, and rules for
     other processes survive; an unparseable policy file is refused, never
     clobbered.
+  - **Headless linting**: `netwatch daemon` evaluates the same policy, and
+    violations surface as `netwatch_policy_violations_total{process}` on the
+    Prometheus `/metrics` endpoint (bounded cardinality — only declared
+    processes can appear).
+  - **ECH-aware verdicts**: flows with Encrypted ClientHello show `? ech`
+    instead of `✗ drift` when the miss may be "name unreadable, by design",
+    and the alert text says so.
+  - **Wildcard suggestions**: when ≥3 subdomains of one apex accumulate,
+    promotion writes a `# suggestion: *.apex.tld would cover N entries` comment
+    above the rule — suggested, never silently collapsed.
+  - **Config**: `egress_violation_cooldown_secs` (default 300) controls the
+    per-flow re-warn interval.
+  - **Hardening**: a group/world-writable `egress-policy.toml` is refused with
+    a loud warning — the policy file is a trust anchor.
 
 ## [0.25.9] - 2026-06-27
 

@@ -90,6 +90,12 @@ pub struct NetwatchConfig {
     ///     0-RTT not in scope for the initial implementation).
     #[serde(default)]
     pub tls_keylog_path: String,
+
+    /// How long (seconds) before the same violating flow — one
+    /// (process, destination, port) — re-warns on egress policy drift.
+    /// 0 warns on every connection refresh. Default 300 (5 minutes).
+    #[serde(default = "default_egress_cooldown")]
+    pub egress_violation_cooldown_secs: u64,
 }
 
 fn default_sandbox() -> String {
@@ -132,8 +138,13 @@ impl Default for NetwatchConfig {
             graph_fade: false,
             sandbox: default_sandbox(),
             tls_keylog_path: String::new(),
+            egress_violation_cooldown_secs: default_egress_cooldown(),
         }
     }
+}
+
+fn default_egress_cooldown() -> u64 {
+    300
 }
 
 impl Default for AlertConfig {
@@ -293,6 +304,7 @@ show_geo = false
             graph_fade: false,
             sandbox: "strict".into(),
             tls_keylog_path: "/tmp/sslkeylog.txt".into(),
+            egress_violation_cooldown_secs: 120,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: NetwatchConfig = toml::from_str(&serialized).unwrap();

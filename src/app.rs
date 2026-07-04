@@ -610,7 +610,11 @@ impl App {
             traceroute_runner: TracerouteRunner::new(),
             connection_timeline: ConnectionTimeline::new(),
             network_intel,
-            egress_profiler: crate::collectors::egress::EgressProfiler::with_default_policy(),
+            egress_profiler: {
+                let mut p = crate::collectors::egress::EgressProfiler::with_default_policy();
+                p.set_violation_cooldown(user_config.egress_violation_cooldown_secs);
+                p
+            },
             intel_last_pkt_id: 0,
             #[cfg(feature = "ebpf")]
             conn_tracker: conn_tracker_opt,
@@ -1482,6 +1486,7 @@ pub async fn run_headless(
                         &app.traffic.interfaces(),
                         &app.health_prober,
                         &app.connection_collector,
+                        app.egress_profiler.violation_totals_sorted(),
                     );
                     exporter.set_collectors_ok(healthy);
                 }

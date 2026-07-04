@@ -179,7 +179,22 @@ The loop is **observe → promote → warn**:
    baseline from being blessed as "normal".
 3. **Warn** — flows that fall outside a process's declared allowlist raise a
    `PolicyViolation` alert naming the broken rule. Only processes with a rule are
-   checked, so an unlisted process never warns.
+   checked, so an unlisted process never warns. The re-warn cooldown per flow is
+   `egress_violation_cooldown_secs` in config.toml (default 300; 0 = every refresh).
+   In `netwatch daemon` the same evaluation runs headless, and violations surface
+   as `netwatch_policy_violations_total{process}` on the Prometheus endpoint.
+
+Sharp edges handled for you:
+
+- **ECH**: a flow with Encrypted ClientHello has no readable inner SNI, so a policy
+  miss may be "name unreadable" rather than real drift — those rows show `? ech`
+  (and the alert says so) instead of a red `✗ drift`.
+- **Wildcard suggestions**: when ≥3 subdomains of one apex accumulate in a rule,
+  promotion writes a `# suggestion: *.apex.tld would cover N entries` comment above
+  the rule. It never collapses silently — widening the allowlist is your call.
+- **Policy file trust**: a group- or world-writable `egress-policy.toml` is refused
+  with a loud log warning. If anyone but the owner can edit the policy, "warn on
+  drift" could be silenced by the very thing drifting. `chmod 644` or stricter.
 
 ```toml
 # egress-policy.toml

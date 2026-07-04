@@ -97,13 +97,21 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 continue;
             }
             let is_selected = total - 1 == selected;
-            let name = dest
-                .sni
-                .clone()
-                .or_else(|| dest.asn_org.clone())
-                .unwrap_or_else(|| "(ip)".to_string());
+            let name = match (&dest.sni, &dest.asn_org, dest.ech) {
+                (Some(s), _, _) => s.clone(),
+                (None, Some(a), true) => format!("{a} (ech)"),
+                (None, Some(a), false) => a.clone(),
+                (None, None, true) => "(ech — name encrypted)".to_string(),
+                (None, None, false) => "(ip)".to_string(),
+            };
             let (verdict, vstyle) = match app.egress_profiler.dest_allowed(&profile.process, dest) {
                 Some(true) => ("✓ ok", Style::default().fg(t.status_good)),
+                // ECH hides the inner SNI by design — a miss with no readable
+                // name may be "unreadable", not drift. Distinguish it so
+                // encrypted names don't read as red alarms.
+                Some(false) if dest.ech && dest.sni.is_none() => {
+                    ("? ech", Style::default().fg(t.status_warn))
+                }
                 Some(false) => ("✗ drift", Style::default().fg(t.status_error).bold()),
                 None => ("—", Style::default().fg(t.text_muted)),
             };

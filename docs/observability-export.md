@@ -52,6 +52,7 @@ trusted network boundary.
 | `netwatch_dns_loss_ratio` | gauge | DNS packet loss (0–1) |
 | `netwatch_connections` | gauge | Tracked connections |
 | `netwatch_tcp_connections{state}` | gauge | TCP connections by state (`time_wait`, `close_wait`) |
+| `netwatch_policy_violations_total{process}` | counter | Egress-policy violations per process (post-cooldown; only processes declared in `egress-policy.toml` can appear, so cardinality stays bounded) |
 
 Names and units follow Prometheus base-unit conventions (`_bytes`, `_seconds`,
 `_ratio`, `_total`).

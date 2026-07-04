@@ -47,6 +47,10 @@ pub struct EgressDest {
     /// when the ASN database resolved it.
     pub asn_org: Option<String>,
     pub port: u16,
+    /// True when this destination was (ever) reached with an Encrypted
+    /// ClientHello — the inner SNI is hidden by design, so a policy miss on
+    /// this row may be "name unreadable", not real drift. Sticky once seen.
+    pub ech: bool,
     /// Wall-clock times, not `Instant`: the evidence a human reviews at
     /// promote time ("known for 3 weeks" vs "showed up 40 seconds ago")
     /// must survive restarts, and the persisted baseline serializes them.
@@ -82,23 +86,48 @@ pub struct Violation {
 
 /// Accumulates per-process egress profiles across connection refreshes, and
 /// (when a policy is loaded) flags flows that drift from the declared rules.
-#[derive(Default)]
 pub struct EgressProfiler {
     profiles: HashMap<String, EgressProfile>,
     /// Declared egress policy, if any. `None` ⇒ pure observe mode.
     policy: Option<EgressPolicy>,
     /// Cooldown per violating (process, dest, port) so a steady violation
-    /// warns periodically, not every tick.
+    /// warns periodically, not every tick. Configurable via
+    /// `egress_violation_cooldown_secs` in config.toml.
     violation_cooldown: HashMap<(String, String, u16), Instant>,
+    cooldown: Duration,
     /// Newly-detected violations awaiting drain by the caller.
     pending: Vec<Violation>,
+    /// Cumulative violation count per process (post-cooldown, so it tracks
+    /// the alert stream). Bounded: only processes with a declared rule can
+    /// violate. Feeds `netwatch_policy_violations_total` on /metrics.
+    violation_totals: HashMap<String, u64>,
     /// Last time the baseline was written to disk (rate-limits `maybe_persist`).
     last_persist: Option<Instant>,
+}
+
+impl Default for EgressProfiler {
+    fn default() -> Self {
+        Self {
+            profiles: HashMap::new(),
+            policy: None,
+            violation_cooldown: HashMap::new(),
+            cooldown: Duration::from_secs(VIOLATION_COOLDOWN_SECS),
+            pending: Vec::new(),
+            violation_totals: HashMap::new(),
+            last_persist: None,
+        }
+    }
 }
 
 impl EgressProfiler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the per-flow re-warn cooldown (config:
+    /// `egress_violation_cooldown_secs`; 0 ⇒ warn on every tick).
+    pub fn set_violation_cooldown(&mut self, secs: u64) {
+        self.cooldown = Duration::from_secs(secs);
     }
 
     /// Construct and load both the declared policy and the persisted learned
@@ -140,21 +169,23 @@ impl EgressProfiler {
             };
 
             let sni = dest_hostname(&conn.app_protocol);
+            let ech = flow_ech(&conn.app_protocol);
             let asn_org = geo.lookup(&ip).map(|g| g.org).filter(|o| !o.is_empty());
-            self.record(process, &ip, port, sni.clone(), asn_org.clone(), wall);
-            self.check_policy(process, &ip, port, &sni, &asn_org, now);
+            self.record_flow(process, &ip, port, sni.clone(), asn_org.clone(), ech, wall);
+            self.check_policy(process, &ip, port, &sni, &asn_org, ech, now);
         }
         self.evict_processes_if_needed();
         // Drop expired cooldown entries so the map stays bounded.
-        self.violation_cooldown.retain(|_, &mut t| {
-            now.duration_since(t) < Duration::from_secs(VIOLATION_COOLDOWN_SECS)
-        });
+        let cooldown = self.cooldown;
+        self.violation_cooldown
+            .retain(|_, &mut t| now.duration_since(t) < cooldown);
     }
 
     /// Compare one observed flow against the loaded policy. Only processes
     /// that *have* a declared rule are checked — an unlisted process has no
     /// rule to violate, so it never warns (deterministic, low-noise). A new
     /// violation is queued (subject to the per-flow cooldown).
+    #[allow(clippy::too_many_arguments)]
     fn check_policy(
         &mut self,
         process: &str,
@@ -162,6 +193,7 @@ impl EgressProfiler {
         port: u16,
         sni: &Option<String>,
         asn_org: &Option<String>,
+        ech: bool,
         now: Instant,
     ) {
         let Some(policy) = &self.policy else {
@@ -170,9 +202,14 @@ impl EgressProfiler {
         let Some(rule) = policy.process.get(process) else {
             return;
         };
-        let Some(reason) = rule.violation(sni.as_deref(), asn_org.as_deref(), port) else {
+        let Some(mut reason) = rule.violation(sni.as_deref(), asn_org.as_deref(), port) else {
             return;
         };
+        // An ECH flow's inner SNI is hidden by design — the miss may be
+        // "name unreadable", not real drift. Say so in the alert.
+        if ech && sni.is_none() {
+            reason.push_str(" (ECH — real name encrypted)");
+        }
         let dest = sni
             .clone()
             .or_else(|| asn_org.clone())
@@ -180,11 +217,15 @@ impl EgressProfiler {
 
         let key = (process.to_string(), dest.clone(), port);
         if let Some(&last) = self.violation_cooldown.get(&key) {
-            if now.duration_since(last) < Duration::from_secs(VIOLATION_COOLDOWN_SECS) {
+            if now.duration_since(last) < self.cooldown {
                 return;
             }
         }
         self.violation_cooldown.insert(key, now);
+        *self
+            .violation_totals
+            .entry(process.to_string())
+            .or_insert(0) += 1;
         self.pending.push(Violation {
             process: process.to_string(),
             dest,
@@ -249,6 +290,8 @@ impl EgressProfiler {
     /// `observe` so the join/key/eviction logic is testable without the geo
     /// resolver. The destination identity prefers the most specific name we
     /// have: SNI, then ASN org, then the raw IP.
+    /// Test-facing shorthand for `record_flow` with `ech: false`.
+    #[cfg(test)]
     fn record(
         &mut self,
         process: &str,
@@ -258,13 +301,28 @@ impl EgressProfiler {
         asn_org: Option<String>,
         now: SystemTime,
     ) {
+        self.record_flow(process, ip, port, sni, asn_org, false, now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_flow(
+        &mut self,
+        process: &str,
+        ip: &str,
+        port: u16,
+        sni: Option<String>,
+        asn_org: Option<String>,
+        ech: bool,
+        now: SystemTime,
+    ) {
         let label = sni
             .clone()
             .or_else(|| asn_org.clone())
             .unwrap_or_else(|| ip.to_string());
-        self.upsert(process, (label, port), sni, asn_org, port, now);
+        self.upsert(process, (label, port), sni, asn_org, port, ech, now);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
         process: &str,
@@ -272,6 +330,7 @@ impl EgressProfiler {
         sni: Option<String>,
         asn_org: Option<String>,
         port: u16,
+        ech: bool,
         now: SystemTime,
     ) {
         let profile = self
@@ -287,6 +346,7 @@ impl EgressProfiler {
         if let Some(dest) = profile.dests.get_mut(&key) {
             dest.last_seen = now;
             dest.count += 1;
+            dest.ech |= ech;
             // Backfill a name/ASN that wasn't resolved on first sight (SNI
             // appears once the ClientHello is parsed; ASN once geo resolves).
             if dest.sni.is_none() {
@@ -314,11 +374,24 @@ impl EgressProfiler {
                 sni,
                 asn_org,
                 port,
+                ech,
                 first_seen: now,
                 last_seen: now,
                 count: 1,
             },
         );
+    }
+
+    /// Cumulative post-cooldown violation counts per process, sorted by
+    /// process name — the `netwatch_policy_violations_total` series.
+    pub fn violation_totals_sorted(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .violation_totals
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     fn evict_processes_if_needed(&mut self) {
@@ -395,6 +468,7 @@ impl EgressProfiler {
                             port: *port,
                             sni: d.sni.clone(),
                             asn_org: d.asn_org.clone(),
+                            ech: d.ech,
                             first_seen: unix_secs(d.first_seen),
                             last_seen: unix_secs(d.last_seen),
                             count: d.count,
@@ -456,6 +530,7 @@ impl EgressProfiler {
                         sni: dest.sni,
                         asn_org: dest.asn_org,
                         port: dest.port,
+                        ech: dest.ech,
                         first_seen: from_unix_secs(dest.first_seen),
                         last_seen,
                         count: dest.count,
@@ -520,6 +595,8 @@ struct PersistedDest {
     port: u16,
     sni: Option<String>,
     asn_org: Option<String>,
+    #[serde(default)]
+    ech: bool,
     first_seen: u64,
     last_seen: u64,
     count: u64,
@@ -600,8 +677,57 @@ pub fn default_policy_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("netwatch").join("egress-policy.toml"))
 }
 
+/// Suggest wildcard collapses for a rule: when several `allow_sni` entries
+/// are subdomains of one apex (naively the last two labels), a `*.apex`
+/// entry would cover them all. Returned as *suggestions* — the promotion
+/// writes the exact entries and a comment; the human collapses by hand if
+/// they agree. Silent collapse would widen the allowlist unratified.
+pub fn wildcard_suggestions(rule: &ProcessRule) -> Vec<String> {
+    const MIN_SUBDOMAINS: usize = 3;
+    let mut by_apex: HashMap<String, usize> = HashMap::new();
+    for host in &rule.allow_sni {
+        if host.starts_with("*.") {
+            continue; // already a wildcard
+        }
+        let labels: Vec<&str> = host.split('.').collect();
+        // Only proper subdomains suggest a wildcard; apex entries don't.
+        // (Two-label apex assumption — good enough for a suggestion; wrong
+        // for eTLDs like co.uk, which is why this never auto-applies.)
+        if labels.len() > 2 {
+            let apex = labels[labels.len() - 2..].join(".");
+            *by_apex.entry(apex).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<String> = by_apex
+        .into_iter()
+        .filter(|(_, n)| *n >= MIN_SUBDOMAINS)
+        .map(|(apex, n)| format!("*.{apex} would cover {n} entries"))
+        .collect();
+    out.sort();
+    out
+}
+
 /// Load a policy from disk. `None` if the file is absent or unparseable.
+/// On unix a group- or world-writable policy is **refused** (with a loud
+/// warning): the policy is a trust anchor — if anyone but the owner can
+/// edit it, "warn on drift" can be silenced by the very thing drifting.
 pub fn load_policy_file(path: &Path) -> Option<EgressPolicy> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o022 != 0 {
+                tracing::warn!(
+                    target: "netwatch::egress",
+                    path = %path.display(),
+                    mode = format!("{:o}", mode & 0o777),
+                    "REFUSING group/world-writable egress policy — chmod 644 (or stricter) to load it"
+                );
+                return None;
+            }
+        }
+    }
     let contents = std::fs::read_to_string(path).ok()?;
     match toml::from_str(&contents) {
         Ok(policy) => Some(policy),
@@ -656,6 +782,13 @@ pub fn merge_rules_into_policy_file(
     }
     for (name, rule) in rules {
         let mut t = toml_edit::Table::new();
+        // Wildcard suggestions land as a comment above the rule — visible
+        // exactly where the human reviews, applied only by their hand.
+        let suggestions = wildcard_suggestions(rule);
+        if !suggestions.is_empty() {
+            t.decor_mut()
+                .set_prefix(format!("# suggestion: {}\n", suggestions.join("; ")));
+        }
         t["allow_sni"] = toml_edit::value(toml_edit::Array::from_iter(
             rule.allow_sni.iter().map(String::as_str),
         ));
@@ -709,6 +842,15 @@ fn dest_hostname(p: &Option<AppProtocol>) -> Option<String> {
         Some(AppProtocol::Http { host: Some(h), .. }) => Some(h.clone()),
         _ => None,
     }
+}
+
+/// Whether the flow's ClientHello carried an `encrypted_client_hello`
+/// extension — the outer SNI (if any) is a decoy and the real name is hidden.
+fn flow_ech(p: &Option<AppProtocol>) -> bool {
+    matches!(
+        p,
+        Some(AppProtocol::Tls { ech: true, .. }) | Some(AppProtocol::Quic { ech: true, .. })
+    )
 }
 
 #[cfg(test)]
@@ -976,6 +1118,7 @@ mod tests {
             443,
             &sni("evil.example.com"),
             &None,
+            false,
             now,
         );
         // An unlisted process is never flagged (no rule to violate).
@@ -985,6 +1128,7 @@ mod tests {
             443,
             &sni("whatever.com"),
             &None,
+            false,
             now,
         );
 
@@ -1000,6 +1144,7 @@ mod tests {
             443,
             &sni("evil.example.com"),
             &None,
+            false,
             now,
         );
         assert_eq!(p.take_violations().len(), 0);
@@ -1177,6 +1322,160 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.starts_with("[process.ssh\n"), "file untouched");
+    }
+
+    // ── Phase 2: wildcard suggestions, ECH, cooldown, totals, perms ──
+
+    #[test]
+    fn wildcard_suggested_at_three_subdomains_never_for_apex_or_existing() {
+        let rule = ProcessRule {
+            allow_sni: vec![
+                "a.example.com".into(),
+                "b.example.com".into(),
+                "c.example.com".into(),
+                "example.com".into(),   // apex — doesn't count toward the 3
+                "one.other.org".into(), // below threshold
+                "*.already.net".into(), // existing wildcard — ignored
+            ],
+            ..Default::default()
+        };
+        let s = wildcard_suggestions(&rule);
+        assert_eq!(s.len(), 1);
+        assert!(s[0].contains("*.example.com"), "{s:?}");
+        assert!(s[0].contains("3 entries"), "{s:?}");
+    }
+
+    #[test]
+    fn merge_writes_wildcard_suggestion_as_comment_only() {
+        let path = scratch("suggest.toml");
+        let rules = vec![(
+            "chrome".to_string(),
+            ProcessRule {
+                allow_sni: vec![
+                    "a.google.com".into(),
+                    "b.google.com".into(),
+                    "c.google.com".into(),
+                ],
+                allow_asn: vec![],
+                allow_ports: vec![443],
+            },
+        )];
+        merge_rules_into_policy_file(&rules, &path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("# suggestion:") && body.contains("*.google.com"),
+            "suggestion comment present: {body}"
+        );
+        // The rule itself still lists exact entries — no silent collapse.
+        let parsed: EgressPolicy = toml::from_str(&body).unwrap();
+        let sni = &parsed.process.get("chrome").unwrap().allow_sni;
+        assert_eq!(sni.len(), 3);
+        assert!(!sni.iter().any(|s| s.starts_with("*.")));
+    }
+
+    #[test]
+    fn ech_is_sticky_and_survives_persistence() {
+        let path = scratch("ech.json");
+        let mut p = EgressProfiler::new();
+        let now = SystemTime::now();
+        p.record_flow(
+            "chrome",
+            "1.2.3.4",
+            443,
+            None,
+            Some("Cloudflare".into()),
+            true,
+            now,
+        );
+        p.record_flow(
+            "chrome",
+            "1.2.3.4",
+            443,
+            None,
+            Some("Cloudflare".into()),
+            false,
+            now,
+        );
+        let snap = p.snapshot();
+        let dest = snap[0].dests.get(&("Cloudflare".to_string(), 443)).unwrap();
+        assert!(dest.ech, "ech is sticky once observed");
+
+        p.save_profiles(&path).unwrap();
+        let mut fresh = EgressProfiler::new();
+        fresh.load_profiles(&path);
+        let snap = fresh.snapshot();
+        assert!(
+            snap[0]
+                .dests
+                .get(&("Cloudflare".to_string(), 443))
+                .unwrap()
+                .ech
+        );
+    }
+
+    #[test]
+    fn ech_violation_reason_names_the_encryption() {
+        let mut p = EgressProfiler::new();
+        let mut policy = EgressPolicy::default();
+        policy.process.insert(
+            "app".into(),
+            ProcessRule {
+                allow_sni: vec!["api.example.com".into()],
+                ..Default::default()
+            },
+        );
+        p.set_policy(Some(policy));
+        p.check_policy(
+            "app",
+            "203.0.113.9",
+            443,
+            &None,
+            &None,
+            true,
+            Instant::now(),
+        );
+        let v = p.take_violations();
+        assert_eq!(v.len(), 1);
+        assert!(v[0].reason.contains("ECH"), "{}", v[0].reason);
+    }
+
+    #[test]
+    fn zero_cooldown_rewarns_every_check_and_totals_accumulate() {
+        let mut p = EgressProfiler::new();
+        p.set_violation_cooldown(0);
+        let mut policy = EgressPolicy::default();
+        policy.process.insert(
+            "app".into(),
+            ProcessRule {
+                allow_sni: vec!["api.example.com".into()],
+                ..Default::default()
+            },
+        );
+        p.set_policy(Some(policy));
+        let now = Instant::now();
+        p.check_policy("app", "1.1.1.1", 443, &sni("evil.com"), &None, false, now);
+        p.check_policy("app", "1.1.1.1", 443, &sni("evil.com"), &None, false, now);
+        assert_eq!(
+            p.take_violations().len(),
+            2,
+            "cooldown 0 ⇒ every check warns"
+        );
+        assert_eq!(p.violation_totals_sorted(), vec![("app".to_string(), 2)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_policy_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("loose.toml");
+        std::fs::write(&path, "[process.ssh]\nallow_ports = [22]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(
+            load_policy_file(&path).is_none(),
+            "world-writable policy must be refused"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_policy_file(&path).is_some(), "0644 loads fine");
     }
 
     #[test]
