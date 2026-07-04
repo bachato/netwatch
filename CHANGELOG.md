@@ -4,6 +4,20 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Egress promote now reliably takes effect.** A freshly-promoted
+  `egress-policy.toml` written under a loose umask could be group/world-writable,
+  which the policy loader then refused — so the promote appeared to do nothing
+  (verdicts stayed `—`). Policy writes are now owner-only (`0o600`) and tighten a
+  loose pre-existing file, and a failed reload is reported instead of claimed as
+  success. The promote confirmation also persists its full display duration.
+
+### Changed
+- **Egress tab shows the real destination IP** in its own column — nameless
+  destinations no longer collapse to a `(ip)` placeholder, and the IP is carried
+  in the NDJSON export. Active drift warnings now render in a panel **on the
+  Egress tab itself**, newest first, instead of only in the Timeline alert feed.
+
 ### Added
 - **Egress policy linter (Horizon 3 foundation)** — observe → promote → warn:
   - **Egress tab** (`0`): per-process destination profiles (SNI / ASN org / port),
@@ -41,7 +55,7 @@ All notable changes to NetWatch will be documented in this file.
     a loud warning — the policy file is a trust anchor.
   - **Structured export** (`e` on the Egress tab): writes attributed egress
     records as versioned NDJSON (`netwatch.egress.v1`) — one metadata-only JSON
-    object per line (process, SNI, ASN, port, proto, ECH, first/last-seen,
+    object per line (process, SNI, ASN, IP, port, proto, ECH, first/last-seen,
     count, policy verdict), preceded by a `_meta` schema line. No payload ever.
 
 ## [0.25.9] - 2026-06-27

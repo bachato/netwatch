@@ -51,6 +51,11 @@ pub struct EgressDest {
     /// when the ASN database resolved it.
     pub asn_org: Option<String>,
     pub port: u16,
+    /// Most recent remote IP observed for this destination. Always populated
+    /// (an SNI/CDN destination fronts many IPs; this is the last one seen).
+    /// Shown so a nameless row isn't a useless "(ip)" placeholder, and so the
+    /// export carries the concrete endpoint.
+    pub last_ip: String,
     /// True when this destination was (ever) reached with an Encrypted
     /// ClientHello — the inner SNI is hidden by design, so a policy miss on
     /// this row may be "name unreadable", not real drift. Sticky once seen.
@@ -86,6 +91,8 @@ pub struct EgressRecord {
     pub sni: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asn_org: Option<String>,
+    /// Most recent concrete remote IP for this destination.
+    pub ip: String,
     pub port: u16,
     /// Coarse L7 class: `tls` when a ClientHello named the destination,
     /// else `other`. Kept coarse on purpose — no payload inspection.
@@ -111,6 +118,20 @@ pub struct Violation {
     pub reason: String,
 }
 
+/// A retained violation for on-screen display (the Egress tab shows these,
+/// separate from the drained `pending` queue that feeds the alert stream).
+#[derive(Clone, Debug)]
+pub struct RecentViolation {
+    pub process: String,
+    pub dest: String,
+    pub port: u16,
+    pub reason: String,
+    pub when: SystemTime,
+}
+
+/// How many recent violations to retain for the on-screen warnings panel.
+const RECENT_VIOLATIONS_CAP: usize = 100;
+
 /// Accumulates per-process egress profiles across connection refreshes, and
 /// (when a policy is loaded) flags flows that drift from the declared rules.
 pub struct EgressProfiler {
@@ -124,6 +145,9 @@ pub struct EgressProfiler {
     cooldown: Duration,
     /// Newly-detected violations awaiting drain by the caller.
     pending: Vec<Violation>,
+    /// Retained recent violations for the on-screen warnings panel (bounded
+    /// ring). Distinct from `pending`, which the caller drains each tick.
+    recent: std::collections::VecDeque<RecentViolation>,
     /// Cumulative violation count per process (post-cooldown, so it tracks
     /// the alert stream). Bounded: only processes with a declared rule can
     /// violate. Feeds `netwatch_policy_violations_total` on /metrics.
@@ -140,6 +164,7 @@ impl Default for EgressProfiler {
             violation_cooldown: HashMap::new(),
             cooldown: Duration::from_secs(VIOLATION_COOLDOWN_SECS),
             pending: Vec::new(),
+            recent: std::collections::VecDeque::new(),
             violation_totals: HashMap::new(),
             last_persist: None,
         }
@@ -255,10 +280,30 @@ impl EgressProfiler {
             .or_insert(0) += 1;
         self.pending.push(Violation {
             process: process.to_string(),
+            dest: dest.clone(),
+            port,
+            reason: reason.clone(),
+        });
+        // Retain for the on-screen warnings panel (bounded ring).
+        self.recent.push_front(RecentViolation {
+            process: process.to_string(),
             dest,
             port,
             reason,
+            when: SystemTime::now(),
         });
+        self.recent.truncate(RECENT_VIOLATIONS_CAP);
+    }
+
+    /// Recent violations retained for the on-screen warnings panel, newest
+    /// first. Independent of `take_violations` (which drains the alert feed).
+    pub fn recent_violations(&self) -> impl Iterator<Item = &RecentViolation> {
+        self.recent.iter()
+    }
+
+    /// Number of retained recent violations.
+    pub fn recent_violation_count(&self) -> usize {
+        self.recent.len()
     }
 
     /// Install (or clear) the declared egress policy.
@@ -346,7 +391,7 @@ impl EgressProfiler {
             .clone()
             .or_else(|| asn_org.clone())
             .unwrap_or_else(|| ip.to_string());
-        self.upsert(process, (label, port), sni, asn_org, port, ech, now);
+        self.upsert(process, (label, port), sni, asn_org, port, ip, ech, now);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -357,6 +402,7 @@ impl EgressProfiler {
         sni: Option<String>,
         asn_org: Option<String>,
         port: u16,
+        ip: &str,
         ech: bool,
         now: SystemTime,
     ) {
@@ -374,6 +420,7 @@ impl EgressProfiler {
             dest.last_seen = now;
             dest.count += 1;
             dest.ech |= ech;
+            dest.last_ip = ip.to_string();
             // Backfill a name/ASN that wasn't resolved on first sight (SNI
             // appears once the ClientHello is parsed; ASN once geo resolves).
             if dest.sni.is_none() {
@@ -401,6 +448,7 @@ impl EgressProfiler {
                 sni,
                 asn_org,
                 port,
+                last_ip: ip.to_string(),
                 ech,
                 first_seen: now,
                 last_seen: now,
@@ -478,6 +526,7 @@ impl EgressProfiler {
                     process: profile.process.clone(),
                     sni: dest.sni.clone(),
                     asn_org: dest.asn_org.clone(),
+                    ip: dest.last_ip.clone(),
                     port: dest.port,
                     proto: if dest.sni.is_some() { "tls" } else { "other" }.to_string(),
                     ech: dest.ech,
@@ -562,6 +611,7 @@ impl EgressProfiler {
                             port: *port,
                             sni: d.sni.clone(),
                             asn_org: d.asn_org.clone(),
+                            ip: d.last_ip.clone(),
                             ech: d.ech,
                             first_seen: unix_secs(d.first_seen),
                             last_seen: unix_secs(d.last_seen),
@@ -624,6 +674,7 @@ impl EgressProfiler {
                         sni: dest.sni,
                         asn_org: dest.asn_org,
                         port: dest.port,
+                        last_ip: dest.ip,
                         ech: dest.ech,
                         first_seen: from_unix_secs(dest.first_seen),
                         last_seen,
@@ -689,6 +740,8 @@ struct PersistedDest {
     port: u16,
     sni: Option<String>,
     asn_org: Option<String>,
+    #[serde(default)]
+    ip: String,
     #[serde(default)]
     ech: bool,
     first_seen: u64,
@@ -839,10 +892,35 @@ pub fn save_policy_file(policy: &EgressPolicy, path: &Path) -> std::io::Result<(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let header = "# netwatch egress policy (observe → promote → warn).\n\
-                  # Generated from the observed baseline; review before trusting.\n\
-                  # The linter WARNS on drift — it never blocks.\n\n";
-    std::fs::write(path, format!("{header}{body}"))
+    write_owner_only(path, format!("{POLICY_HEADER}{body}").as_bytes())
+}
+
+/// Write a file owner-read/write only (`0o600` on unix). The egress policy is
+/// a trust anchor: `load_policy_file` refuses a group/world-writable one, so
+/// our OWN writes must be tight or promote-then-reload would refuse the file
+/// we just wrote (which looked like "promote didn't take"). No-op perms on
+/// non-unix; the byte write still happens.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)?;
+        // Re-assert mode in case the file pre-existed with looser perms
+        // (create+mode only applies to newly-created files).
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
 }
 
 const POLICY_HEADER: &str = "# netwatch egress policy (observe → promote → warn).\n\
@@ -898,7 +976,7 @@ pub fn merge_rules_into_policy_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, doc.to_string())
+    write_owner_only(path, doc.to_string().as_bytes())
 }
 
 /// One-line summary of what promoting `new` changes relative to the declared
@@ -1653,6 +1731,119 @@ mod tests {
         assert_eq!(rec.process, "chrome");
         // No payload field ever leaks into the export.
         assert!(!lines[1].contains("payload") && !lines[1].contains("raw"));
+    }
+
+    // ── Field-report fixes ──
+
+    #[cfg(unix)]
+    #[test]
+    fn promote_writes_owner_only_so_reload_is_not_refused() {
+        // Regression: the world-writable refusal (Phase 2) rejected our OWN
+        // freshly-promoted file under a loose umask, so promote silently
+        // didn't take. Our writes must be 0o600 and reload cleanly.
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("promote-perms.toml");
+        let rules = vec![(
+            "chrome".to_string(),
+            ProcessRule {
+                allow_sni: vec!["*.google.com".into()],
+                allow_ports: vec![443],
+                ..Default::default()
+            },
+        )];
+        merge_rules_into_policy_file(&rules, &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "promoted policy must be owner-only");
+        assert!(
+            load_policy_file(&path).is_some(),
+            "our own promoted file must reload, not be refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promote_tightens_a_preexisting_loose_policy_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("preexisting-loose.toml");
+        std::fs::write(&path, "[process.ssh]\nallow_ports=[22]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let rules = vec![("chrome".to_string(), ProcessRule::default())];
+        merge_rules_into_policy_file(&rules, &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a loose pre-existing file is tightened on write"
+        );
+        assert!(load_policy_file(&path).is_some());
+    }
+
+    #[test]
+    fn nameless_destination_keeps_its_real_ip() {
+        let mut p = EgressProfiler::new();
+        p.record("nc", "203.0.113.7", 4444, None, None, SystemTime::now());
+        let snap = p.snapshot();
+        let dest = snap[0]
+            .dests
+            .get(&("203.0.113.7".to_string(), 4444))
+            .unwrap();
+        assert_eq!(dest.last_ip, "203.0.113.7");
+        // And it reaches the export as a concrete endpoint.
+        let rec = &p.export_records()[0];
+        assert_eq!(rec.ip, "203.0.113.7");
+    }
+
+    #[test]
+    fn named_destination_still_records_the_backing_ip() {
+        let mut p = EgressProfiler::new();
+        p.record(
+            "chrome",
+            "142.250.1.1",
+            443,
+            sni("www.google.com"),
+            Some("Google LLC".into()),
+            SystemTime::now(),
+        );
+        let snap = p.snapshot();
+        let dest = snap[0]
+            .dests
+            .get(&("www.google.com".to_string(), 443))
+            .unwrap();
+        assert_eq!(
+            dest.last_ip, "142.250.1.1",
+            "named row still carries the IP"
+        );
+    }
+
+    #[test]
+    fn violations_are_retained_for_the_on_screen_panel() {
+        let mut p = EgressProfiler::new();
+        let mut policy = EgressPolicy::default();
+        policy.process.insert(
+            "app".into(),
+            ProcessRule {
+                allow_sni: vec!["api.example.com".into()],
+                ..Default::default()
+            },
+        );
+        p.set_policy(Some(policy));
+        assert_eq!(p.recent_violation_count(), 0);
+
+        p.check_policy(
+            "app",
+            "203.0.113.9",
+            443,
+            &sni("evil.example.com"),
+            &None,
+            false,
+            Instant::now(),
+        );
+        // Draining the alert feed does NOT clear the on-screen history.
+        let _ = p.take_violations();
+        assert_eq!(p.recent_violation_count(), 1);
+        let v = p.recent_violations().next().unwrap();
+        assert_eq!(v.process, "app");
+        assert_eq!(v.dest, "evil.example.com");
+        assert!(v.reason.contains("not in allowlist"));
     }
 
     #[test]

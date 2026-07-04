@@ -802,17 +802,21 @@ impl App {
             Ok(()) => {
                 // Reload from the file so the effective policy is exactly
                 // what the user would see opening it — merged, not replaced.
-                self.egress_profiler
-                    .set_policy(egress::load_policy_file(&path));
-                self.ui.export_status = Some(format!(
-                    "Egress policy promoted: {proc_count} processes → {}",
-                    path.display()
-                ));
+                let loaded = egress::load_policy_file(&path);
+                let ok = loaded.is_some();
+                self.egress_profiler.set_policy(loaded);
+                self.ui.export_status = Some(if ok {
+                    format!("Promoted {proc_count} processes — warn on drift active")
+                } else {
+                    // Written but not reloadable — don't claim success.
+                    "Promoted but reload failed — check file permissions".to_string()
+                });
             }
             Err(e) => {
                 self.ui.export_status = Some(format!("Egress promote failed: {e}"));
             }
         }
+        self.ui.export_status_tick = 0;
     }
 
     /// Promote only the process under the cursor on the Egress tab —
@@ -833,14 +837,20 @@ impl App {
         };
         match egress::merge_rules_into_policy_file(&[(process.clone(), rule)], &path) {
             Ok(()) => {
-                self.egress_profiler
-                    .set_policy(egress::load_policy_file(&path));
-                self.ui.export_status = Some(format!("Promoted {process}: {diff}"));
+                let loaded = egress::load_policy_file(&path);
+                let ok = loaded.is_some();
+                self.egress_profiler.set_policy(loaded);
+                self.ui.export_status = Some(if ok {
+                    format!("Promoted {process}: {diff} — now warning on drift")
+                } else {
+                    format!("Promoted {process} but reload failed — check file permissions")
+                });
             }
             Err(e) => {
                 self.ui.export_status = Some(format!("Egress promote failed: {e}"));
             }
         }
+        self.ui.export_status_tick = 0;
     }
 
     fn disarm_incident_recorder(&mut self) {

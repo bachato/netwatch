@@ -14,18 +14,27 @@ use ratatui::{
 };
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
+    // Reserve a warnings panel at the bottom only when there are warnings to
+    // show — otherwise the profile table gets the full height.
+    let has_warnings = app.egress_profiler.recent_violation_count() > 0;
+    let warn_h: u16 = if has_warnings { 8 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(5),    // table
-            Constraint::Length(3), // footer
+            Constraint::Length(3),      // header
+            Constraint::Min(5),         // profile table
+            Constraint::Length(warn_h), // warnings panel (0 when none)
+            Constraint::Length(3),      // footer
         ])
         .split(area);
 
     render_header(f, app, chunks[0]);
     render_table(f, app, chunks[1]);
-    render_footer(f, app, chunks[2]);
+    if has_warnings {
+        render_warnings(f, app, chunks[2]);
+    }
+    render_footer(f, app, chunks[3]);
 }
 
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
@@ -97,12 +106,14 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 continue;
             }
             let is_selected = total - 1 == selected;
+            // Never hide the endpoint: a nameless row shows its real IP, not
+            // a useless "(ip)" placeholder. Named rows show the name; the
+            // concrete IP is always in its own column and in the export.
             let name = match (&dest.sni, &dest.asn_org, dest.ech) {
                 (Some(s), _, _) => s.clone(),
-                (None, Some(a), true) => format!("{a} (ech)"),
-                (None, Some(a), false) => a.clone(),
+                (None, Some(a), _) => a.clone(),
                 (None, None, true) => "(ech — name encrypted)".to_string(),
-                (None, None, false) => "(ip)".to_string(),
+                (None, None, false) => dest.last_ip.clone(),
             };
             let (verdict, vstyle) = match app.egress_profiler.dest_allowed(&profile.process, dest) {
                 Some(true) => ("✓ ok", Style::default().fg(t.status_good)),
@@ -115,12 +126,11 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 Some(false) => ("✗ drift", Style::default().fg(t.status_error).bold()),
                 None => ("—", Style::default().fg(t.text_muted)),
             };
-            let asn = dest.asn_org.clone().unwrap_or_default();
             let row = Row::new(vec![
                 Cell::from(profile.process.clone()).style(Style::default().fg(t.text_primary)),
                 Cell::from(name).style(Style::default().fg(t.text_primary)),
+                Cell::from(dest.last_ip.clone()).style(Style::default().fg(t.text_muted)),
                 Cell::from(dest.port.to_string()).style(Style::default().fg(t.text_secondary)),
-                Cell::from(asn).style(Style::default().fg(t.text_muted)),
                 Cell::from(dest.count.to_string()).style(Style::default().fg(t.text_secondary)),
                 Cell::from(fmt_age(dest.first_seen, now)).style(Style::default().fg(t.text_muted)),
                 Cell::from(fmt_age(dest.last_seen, now))
@@ -139,8 +149,8 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         "Process",
         "Destination",
+        "IP",
         "Port",
-        "ASN org",
         "Seen",
         "First",
         "Last",
@@ -158,14 +168,14 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(16),
-            Constraint::Percentage(30),
-            Constraint::Length(6),
-            Constraint::Percentage(20),
-            Constraint::Length(6),
-            Constraint::Length(7),
-            Constraint::Length(6),
-            Constraint::Length(8),
+            Constraint::Percentage(16), // Process
+            Constraint::Percentage(34), // Destination (name)
+            Constraint::Percentage(22), // IP
+            Constraint::Length(6),      // Port
+            Constraint::Length(6),      // Seen (count)
+            Constraint::Length(7),      // First
+            Constraint::Length(6),      // Last
+            Constraint::Length(8),      // Policy
         ],
     )
     .header(header)
@@ -196,6 +206,49 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(t.border)),
     );
     f.render_widget(footer, area);
+}
+
+/// Recent policy-drift warnings, newest first — shown on the same screen so
+/// the operator doesn't have to switch to the Timeline tab to see that a
+/// promoted process has drifted.
+fn render_warnings(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let now = std::time::SystemTime::now();
+    let capacity = area.height.saturating_sub(2) as usize; // borders
+    let total = app.egress_profiler.recent_violation_count();
+
+    let mut lines: Vec<Line> = Vec::new();
+    for v in app.egress_profiler.recent_violations().take(capacity) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:>4} ago  ", fmt_age(v.when, now)),
+                Style::default().fg(t.text_muted),
+            ),
+            Span::styled("⚠ ", Style::default().fg(t.status_error)),
+            Span::styled(
+                v.process.clone(),
+                Style::default().fg(t.text_primary).bold(),
+            ),
+            Span::raw(" → "),
+            Span::styled(
+                format!("{}:{}", v.dest, v.port),
+                Style::default().fg(t.status_error),
+            ),
+            Span::styled(
+                format!("  ({})", v.reason),
+                Style::default().fg(t.text_muted),
+            ),
+        ]));
+    }
+
+    let title = format!(" ⚠ Active drift warnings ({total}) ");
+    let panel = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.status_error))
+            .title(title),
+    );
+    f.render_widget(panel, area);
 }
 
 /// The process owning the selected row — flat index over the same ordering

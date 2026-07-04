@@ -199,14 +199,14 @@ Sharp edges handled for you:
 **Structured export.** Press `e` on the Egress tab to write the attributed
 records as **NDJSON** (`netwatch.egress.v1`) — one JSON object per line, preceded
 by a `_meta` line naming the schema. Each record is metadata only (process, SNI,
-ASN org, port, coarse proto, ECH flag, first/last-seen, count, policy verdict) —
-never any payload. This is the ingest contract the managed layer consumes; the
+ASN org, IP, port, coarse proto, ECH flag, first/last-seen, count, policy
+verdict) — never any payload. This is the ingest contract the managed layer consumes; the
 same `policy.toml` the TUI lints with is the file a managed layer would
 distribute.
 
 ```json
 {"_meta":{"schema":"netwatch.egress.v1","records":2}}
-{"process":"chrome","sni":"mail.google.com","asn_org":"Google LLC","port":443,"proto":"tls","ech":false,"first_seen":1751600000,"last_seen":1751603600,"count":42,"verdict":"ok"}
+{"process":"chrome","sni":"mail.google.com","asn_org":"Google LLC","ip":"142.250.66.101","port":443,"proto":"tls","ech":false,"first_seen":1751600000,"last_seen":1751603600,"count":42,"verdict":"ok"}
 ```
 
 ```toml
