@@ -5,6 +5,13 @@ All notable changes to NetWatch will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Promoted processes now all read `✓ ok` — a rule admits its own baseline.**
+  A process with a mix of named and nameless (raw-IP) destinations got a
+  *name-restricted* rule from the named ones, and its raw-IP destinations then
+  drifted against that very rule — so after promote some rows stayed `✗ drift`
+  instead of flipping to `✓ ok`. Rules now carry an `allow_ip` dimension: a flow
+  is allowed if **any** declared dimension (SNI, ASN, or IP) matches, so a
+  nameless destination is admitted by its IP. Promotion captures those IPs.
 - **Egress promote is now additive — it accumulates the full allowlist.**
   Promotion replaced a process's rule with only what was observed in the
   current session, so re-promoting (or promote-all after some destinations had

@@ -254,7 +254,7 @@ impl EgressProfiler {
         let Some(rule) = policy.process.get(process) else {
             return;
         };
-        let Some(mut reason) = rule.violation(sni.as_deref(), asn_org.as_deref(), port) else {
+        let Some(mut reason) = rule.violation(sni.as_deref(), asn_org.as_deref(), ip, port) else {
             return;
         };
         // An ECH flow's inner SNI is hidden by design — the miss may be
@@ -322,8 +322,13 @@ impl EgressProfiler {
     pub fn dest_allowed(&self, process: &str, dest: &EgressDest) -> Option<bool> {
         let rule = self.policy.as_ref()?.process.get(process)?;
         Some(
-            rule.violation(dest.sni.as_deref(), dest.asn_org.as_deref(), dest.port)
-                .is_none(),
+            rule.violation(
+                dest.sni.as_deref(),
+                dest.asn_org.as_deref(),
+                &dest.last_ip,
+                dest.port,
+            )
+            .is_none(),
         )
     }
 
@@ -690,6 +695,7 @@ impl EgressProfiler {
 fn rule_from_profile(profile: &EgressProfile) -> ProcessRule {
     let mut allow_sni = BTreeSet::new();
     let mut allow_asn = BTreeSet::new();
+    let mut allow_ip = BTreeSet::new();
     let mut allow_ports = BTreeSet::new();
     for dest in profile.dests.values() {
         match (&dest.sni, &dest.asn_org) {
@@ -699,13 +705,21 @@ fn rule_from_profile(profile: &EgressProfile) -> ProcessRule {
             (None, Some(a)) => {
                 allow_asn.insert(a.clone());
             }
-            (None, None) => {}
+            // No name at all: the IP is the only identity we have, so admit
+            // it by IP — otherwise this dest would drift against its own
+            // promoted rule the moment a sibling dest contributed an SNI.
+            (None, None) => {
+                if !dest.last_ip.is_empty() {
+                    allow_ip.insert(dest.last_ip.clone());
+                }
+            }
         }
         allow_ports.insert(dest.port);
     }
     ProcessRule {
         allow_sni: allow_sni.into_iter().collect(),
         allow_asn: allow_asn.into_iter().collect(),
+        allow_ip: allow_ip.into_iter().collect(),
         allow_ports: allow_ports.into_iter().collect(),
     }
 }
@@ -780,24 +794,42 @@ pub struct ProcessRule {
     /// a flow has no readable SNI.
     #[serde(default)]
     pub allow_asn: Vec<String>,
+    /// Allowed raw destination IPs — the identity for a flow that carried no
+    /// name (no ClientHello SNI, no resolved ASN). Without this, a rule that
+    /// is name-restricted by *other* destinations would flag its own nameless
+    /// members as drift.
+    #[serde(default)]
+    pub allow_ip: Vec<String>,
     /// Allowed destination ports. Empty ⇒ any port.
     #[serde(default)]
     pub allow_ports: Vec<u16>,
 }
 
 impl ProcessRule {
-    /// Returns `Some(reason)` if the destination is outside this rule.
-    fn violation(&self, sni: Option<&str>, asn_org: Option<&str>, port: u16) -> Option<String> {
+    /// Returns `Some(reason)` if the destination is outside this rule. The
+    /// destination is identified by whichever of `sni` / `asn_org` / `ip` the
+    /// flow carried; a rule admits a flow if *any* dimension it declares
+    /// matches. This is why a promoted baseline admits its own members: a
+    /// named dest matches by SNI, a raw-IP dest matches by IP.
+    fn violation(
+        &self,
+        sni: Option<&str>,
+        asn_org: Option<&str>,
+        ip: &str,
+        port: u16,
+    ) -> Option<String> {
         if !self.allow_ports.is_empty() && !self.allow_ports.contains(&port) {
             return Some(format!("port {port} not in allowlist"));
         }
-        let name_restricted = !self.allow_sni.is_empty() || !self.allow_asn.is_empty();
+        let name_restricted =
+            !self.allow_sni.is_empty() || !self.allow_asn.is_empty() || !self.allow_ip.is_empty();
         if name_restricted {
             let sni_ok = sni.is_some_and(|s| self.allow_sni.iter().any(|p| sni_matches(p, s)));
             let asn_ok =
                 asn_org.is_some_and(|a| self.allow_asn.iter().any(|x| x.eq_ignore_ascii_case(a)));
-            if !sni_ok && !asn_ok {
-                let dest = sni.or(asn_org).unwrap_or("unknown destination");
+            let ip_ok = self.allow_ip.iter().any(|x| x == ip);
+            if !sni_ok && !asn_ok && !ip_ok {
+                let dest = sni.or(asn_org).unwrap_or(ip);
                 return Some(format!("{dest} not in allowlist"));
             }
         }
@@ -993,6 +1025,7 @@ pub fn merge_rules_into_policy_file(
         let existing = doc["process"].get(name.as_str());
         let sni = union_strings(existing, "allow_sni", &rule.allow_sni);
         let asn = union_strings(existing, "allow_asn", &rule.allow_asn);
+        let ip = union_strings(existing, "allow_ip", &rule.allow_ip);
         let ports = union_ports(existing, "allow_ports", &rule.allow_ports);
 
         let mut t = toml_edit::Table::new();
@@ -1002,6 +1035,7 @@ pub fn merge_rules_into_policy_file(
         let unioned = ProcessRule {
             allow_sni: sni.clone(),
             allow_asn: asn.clone(),
+            allow_ip: ip.clone(),
             allow_ports: ports.clone(),
         };
         let suggestions = wildcard_suggestions(&unioned);
@@ -1013,6 +1047,8 @@ pub fn merge_rules_into_policy_file(
             toml_edit::value(toml_edit::Array::from_iter(sni.iter().map(String::as_str)));
         t["allow_asn"] =
             toml_edit::value(toml_edit::Array::from_iter(asn.iter().map(String::as_str)));
+        t["allow_ip"] =
+            toml_edit::value(toml_edit::Array::from_iter(ip.iter().map(String::as_str)));
         t["allow_ports"] = toml_edit::value(toml_edit::Array::from_iter(
             ports.iter().map(|p| i64::from(*p)),
         ));
@@ -1033,21 +1069,23 @@ pub fn rule_diff(old: Option<&ProcessRule>, new: &ProcessRule) -> String {
     }
     let Some(old) = old else {
         return format!(
-            "new rule: {} SNI, {} ASN, {} ports",
+            "new rule: {} SNI, {} ASN, {} IP, {} ports",
             new.allow_sni.len(),
             new.allow_asn.len(),
+            new.allow_ip.len(),
             new.allow_ports.len()
         );
     };
-    let (sni, asn, ports) = (
+    let (sni, asn, ip, ports) = (
         added(&old.allow_sni, &new.allow_sni),
         added(&old.allow_asn, &new.allow_asn),
+        added(&old.allow_ip, &new.allow_ip),
         added(&old.allow_ports, &new.allow_ports),
     );
-    if sni + asn + ports == 0 {
+    if sni + asn + ip + ports == 0 {
         "no additions".to_string()
     } else {
-        format!("+{sni} SNI, +{asn} ASN, +{ports} ports")
+        format!("+{sni} SNI, +{asn} ASN, +{ip} IP, +{ports} ports")
     }
 }
 
@@ -1239,22 +1277,30 @@ mod tests {
         let rule = ProcessRule {
             allow_sni: vec!["*.google.com".into()],
             allow_asn: vec!["Cloudflare, Inc.".into()],
+            allow_ip: vec!["203.0.113.5".into()],
             allow_ports: vec![443],
         };
-        // Allowed: matching SNI on an allowed port.
-        assert!(rule.violation(Some("www.google.com"), None, 443).is_none());
+        let ip = "198.51.100.1"; // an IP NOT in allow_ip, unless stated
+                                 // Allowed: matching SNI on an allowed port.
+        assert!(rule
+            .violation(Some("www.google.com"), None, ip, 443)
+            .is_none());
         // Allowed via ASN fallback when no SNI.
         assert!(rule
-            .violation(None, Some("Cloudflare, Inc."), 443)
+            .violation(None, Some("Cloudflare, Inc."), ip, 443)
             .is_none());
+        // Allowed via IP when there's no name at all.
+        assert!(rule.violation(None, None, "203.0.113.5", 443).is_none());
         // Wrong port.
-        assert!(rule.violation(Some("www.google.com"), None, 8080).is_some());
-        // Unlisted SNI.
         assert!(rule
-            .violation(Some("evil.example.com"), None, 443)
+            .violation(Some("www.google.com"), None, ip, 8080)
             .is_some());
-        // No name at all on a name-restricted rule → violation.
-        assert!(rule.violation(None, None, 443).is_some());
+        // Unlisted SNI (and IP not listed).
+        assert!(rule
+            .violation(Some("evil.example.com"), None, ip, 443)
+            .is_some());
+        // No name AND an unlisted IP on a name-restricted rule → violation.
+        assert!(rule.violation(None, None, ip, 443).is_some());
 
         // A rule with no name restrictions only constrains ports.
         let port_only = ProcessRule {
@@ -1262,10 +1308,10 @@ mod tests {
             ..Default::default()
         };
         assert!(port_only
-            .violation(Some("anything.com"), None, 443)
+            .violation(Some("anything.com"), None, ip, 443)
             .is_none());
         assert!(port_only
-            .violation(Some("anything.com"), None, 80)
+            .violation(Some("anything.com"), None, ip, 80)
             .is_some());
     }
 
@@ -1292,7 +1338,12 @@ mod tests {
 
         // The promoted policy must not flag the very baseline it came from.
         assert!(chrome
-            .violation(Some("www.google.com"), Some("Google LLC"), 443)
+            .violation(
+                Some("www.google.com"),
+                Some("Google LLC"),
+                "142.250.1.1",
+                443
+            )
             .is_none());
     }
 
@@ -1304,6 +1355,7 @@ mod tests {
             ProcessRule {
                 allow_sni: vec!["*.google.com".into()],
                 allow_asn: vec![],
+                allow_ip: vec![],
                 allow_ports: vec![443],
             },
         );
@@ -1323,6 +1375,7 @@ mod tests {
             ProcessRule {
                 allow_sni: vec!["api.example.com".into()],
                 allow_asn: vec![],
+                allow_ip: vec![],
                 allow_ports: vec![443],
             },
         );
@@ -1499,6 +1552,7 @@ mod tests {
             ProcessRule {
                 allow_sni: vec!["*.google.com".into()],
                 allow_asn: vec![],
+                allow_ip: vec![],
                 allow_ports: vec![443],
             },
         )];
@@ -1521,6 +1575,7 @@ mod tests {
             ProcessRule {
                 allow_sni: vec!["*.google.com".into(), "*.gstatic.com".into()],
                 allow_asn: vec![],
+                allow_ip: vec![],
                 allow_ports: vec![443],
             },
         )];
@@ -1575,6 +1630,7 @@ mod tests {
                     "c.google.com".into(),
                 ],
                 allow_asn: vec![],
+                allow_ip: vec![],
                 allow_ports: vec![443],
             },
         )];
@@ -1824,6 +1880,45 @@ mod tests {
     }
 
     #[test]
+    fn promoted_rule_marks_all_its_own_destinations_ok() {
+        // The field-report symptom: after promote, mixed named + nameless
+        // destinations of one process must ALL read "ok" — a raw-IP dest
+        // must not drift against the rule it was promoted into just because
+        // a sibling dest contributed an SNI (which makes the rule
+        // name-restricted).
+        let mut p = EgressProfiler::new();
+        let now = SystemTime::now();
+        // Named dest (has SNI) — makes the rule name-restricted.
+        p.record(
+            "app",
+            "142.250.1.1",
+            443,
+            sni("api.example.com"),
+            Some("Example".into()),
+            now,
+        );
+        // Nameless raw-IP dest for the same process.
+        p.record("app", "203.0.113.9", 4444, None, None, now);
+
+        // Promote and load the rule back (as the UI does).
+        let policy = p.promote();
+        p.set_policy(Some(policy));
+
+        // Every observed destination must now be allowed (verdict = ok).
+        for profile in p.snapshot() {
+            for dest in profile.dests.values() {
+                assert_eq!(
+                    p.dest_allowed(&profile.process, dest),
+                    Some(true),
+                    "dest sni={:?} ip={} must be ok after promote",
+                    dest.sni,
+                    dest.last_ip
+                );
+            }
+        }
+    }
+
+    #[test]
     fn promote_is_additive_and_never_shrinks_the_allowlist() {
         let path = scratch("additive.toml");
 
@@ -1969,16 +2064,24 @@ mod tests {
         let new = ProcessRule {
             allow_sni: vec!["a.com".into(), "b.com".into()],
             allow_asn: vec![],
+            allow_ip: vec![],
             allow_ports: vec![443],
         };
-        assert_eq!(rule_diff(None, &new), "new rule: 2 SNI, 0 ASN, 1 ports");
+        assert_eq!(
+            rule_diff(None, &new),
+            "new rule: 2 SNI, 0 ASN, 0 IP, 1 ports"
+        );
 
         let old = ProcessRule {
             allow_sni: vec!["a.com".into()],
             allow_asn: vec![],
+            allow_ip: vec![],
             allow_ports: vec![443],
         };
-        assert_eq!(rule_diff(Some(&old), &new), "+1 SNI, +0 ASN, +0 ports");
+        assert_eq!(
+            rule_diff(Some(&old), &new),
+            "+1 SNI, +0 ASN, +0 IP, +0 ports"
+        );
         assert_eq!(rule_diff(Some(&new), &new), "no additions");
     }
 }

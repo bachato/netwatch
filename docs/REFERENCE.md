@@ -217,11 +217,16 @@ allow_ports = [443]
 
 [process.node]
 allow_asn = ["CLOUDFLARENET"]                     # fallback when a flow has no SNI
+allow_ip  = ["203.0.113.9"]                        # for a raw-IP dest with no name at all
 ```
 
-Rules are expressed in terms a firewall can't write — `process → {SNI, ASN, port}` —
+Rules are expressed in terms a firewall can't write — `process → {SNI, ASN, IP, port}` —
 because the flow already carries the owning process (eBPF/proc attribution) and the
-destination name (DPI). Edit the file by hand freely; it reloads on startup.
+destination name (DPI). A flow is allowed if **any** declared dimension matches, so a
+promoted baseline admits all of its own destinations: named ones match by SNI/ASN, and a
+nameless raw-IP destination matches by IP (without `allow_ip` it would drift against the
+very rule it was promoted into, once a sibling destination made the rule name-restricted).
+Edit the file by hand freely; it reloads on startup.
 
 ### Landlock sandbox (Linux)
 
