@@ -8,6 +8,7 @@
     <a href="https://crates.io/crates/netwatch-tui"><img src="https://img.shields.io/crates/v/netwatch-tui.svg" alt="crates.io"></a>
     <a href="https://crates.io/crates/netwatch-tui"><img src="https://img.shields.io/crates/d/netwatch-tui.svg" alt="downloads"></a>
     <a href="https://github.com/matthart1983/netwatch/releases"><img src="https://img.shields.io/github/v/release/matthart1983/netwatch" alt="Release"></a>
+    <a href="https://repology.org/project/netwatch-tui/versions"><img src="https://repology.org/badge/tiny-repos/netwatch-tui.svg" alt="Packaging status"></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
@@ -57,14 +58,18 @@ Think of it as **one zero-config binary that does the job of a bandwidth meter, 
 ## Install
 
 ```bash
-# Homebrew (macOS / Linux)
-brew install matthart1983/tap/netwatch
-
-# Cargo
-cargo install netwatch-tui
-
-# Or grab a pre-built binary from Releases
+brew install netwatch                 # macOS / Linux
+nix-shell -p netwatch                 # NixOS / Nix
+paru -S netwatch-tui-bin              # Arch (prebuilt; netwatch-tui builds from source)
+scoop install netwatch                # Windows
+cargo install netwatch-tui            # anywhere with Rust
 ```
+
+Or grab a pre-built binary from [Releases](https://github.com/matthart1983/netwatch/releases/latest).
+
+The Nix, Arch and Scoop packages are maintained by community packagers — thank you. File
+packaging issues with them; file netwatch bugs here. If a package lags a release, the
+[Repology page](https://repology.org/project/netwatch-tui/versions) shows it.
 
 <details>
 <summary><strong>All platforms &amp; build-from-source</strong></summary>
