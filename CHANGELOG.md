@@ -4,6 +4,66 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-07-29
+
+### Added
+- **Grouped trees on Connections and Egress.** `group: process` and
+  `group: remote` were sort orders wearing the word "group" — rows clustered,
+  but the key was restated on every one, so the widest column repeated the
+  string above it and the process name was truncated to `Google Chrome…` for
+  want of space. Both tabs now render one parent row per group carrying a
+  rollup, with foldable children. 63 connections read as 13 processes.
+- **Groups start folded**, so a tab opens on the overview rather than the
+  detail. `z` folds or expands everything; `space` folds the group under the
+  cursor, from a child row as well as its header. Configurable via
+  `groups_start_collapsed` (default true) or the settings screen's
+  "Groups Start Folded".
+- **Byte accounting on Egress.** Destinations accumulate `bytes_out` /
+  `bytes_in` plus a per-tick series for an inline sparkline, from rates the
+  connection table already computed and discarded. An egress-forensics tab
+  could not previously answer *how much data left this machine*.
+- **A verdict vocabulary that distinguishes precision from breadth** —
+  `✓ sni` / `✓ ip` (an endpoint), `~ asn` (an entire autonomous system),
+  `? ech`, `✗ drift`, `— no rule`, `✗ undeclared`. Plus `s` sort (including
+  **risk**), `/` filter, `d` detail pane and mouse support.
+- **`strict = true` in `egress-policy.toml`.** Treats the policy as complete,
+  so a process with no rule becomes a finding rather than a blind spot.
+  Off by default. Without it the linter cannot see the one thing a compromise
+  actually introduces — a binary nobody declared.
+- **Remove a process from the policy** (`x` / `Del`, confirmed with `y`).
+  Promotion could only ever grow an allowlist; withdrawing coverage meant
+  editing the file by hand. Deletion preserves comments, unrelated rules, the
+  `strict` flag and `0600` permissions, and refuses an unparseable file.
+
+### Changed
+- **Promotion no longer widens a rule to an autonomous system.** It wrote an
+  `allow_asn` entry for any destination without an SNI, and a rule admits on
+  *any* dimension — so one nameless hyperscaler flow at promote time admitted
+  every host that AS operates, for that process, permanently, rendering
+  `✓ ok`. Identity now comes from the SNI or the address. On a real
+  25-process baseline this took rules with an ASN-wide entry from **12 of 25
+  to 0**, and admitted (destination, port) pairs from 282 to 245.
+  Hand-written `allow_asn` rules still match; nothing generates one.
+- `Unassigned` — the geo database's *failure* label — is never promoted as an
+  identity. Allowlisting it admitted every destination whose ASN lookup failed.
+- The NDJSON export gains `undeclared` as a distinct verdict rather than
+  folding it into `drift`; nothing was compared, so `drift` would overstate
+  what the linter knows.
+
+### Fixed
+- **Egress `Seen` was a duration wearing a counter's clothes.** `observe` runs
+  once per tick and incremented per tick a flow was present, so `31427` meant
+  *open for 8.7 hours*, not 31k requests. Now rendered as a duration and
+  labelled `Active`.
+- Connections' UDP rows carry an empty state, so a group's dominant-state cell
+  counted `""` as the winner and rendered a bare `11/13` — a fraction of
+  nothing. Only named states compete.
+- Removing the only rule from a policy file emptied it completely, taking the
+  header that documents `strict` and promotion with it.
+- `✗ undeclared` truncated to `✗ undeclare` in the Egress verdict column.
+- Policy-edit status messages were invisible on the Egress tab: they render in
+  the shared header slot, which the tab bar consumes at any ordinary width.
+
 ## [0.28.0] - 2026-07-28
 
 ### Added
