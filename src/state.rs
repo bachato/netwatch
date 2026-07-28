@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use crate::app::{
     default_sort_states, ConnectionGroup, ConnectionStateFilter, IfaceChangeEvent, InterfaceFilter,
     StatsRange, StreamDirectionFilter, Tab, TimelineFilter, TimelineWindow, UiScrollState,
+    ViewMode,
 };
 use crate::config::NetwatchConfig;
 use crate::platform::InterfaceInfo;
@@ -55,6 +56,26 @@ pub struct AppCaches {
     pub rtt_sampled_streams: HashSet<u32>,
 }
 
+/// State owned by the Lite view (`src/ui/lite.rs`).
+///
+/// Kept in its own substruct rather than scattered across [`AppUiState`] so
+/// the Lite surface stays legible and auditable — the design brief caps it at
+/// a selection, one toggle, and one filter, and a substruct makes creep
+/// visible in review.
+#[derive(Default)]
+pub struct LiteState {
+    /// Index into the *filtered* talker list.
+    pub selected: usize,
+    /// First talker row shown, for scrolling past the visible window.
+    pub offset: usize,
+    /// Detail block expanded beneath the selected row (`↵`).
+    pub detail_open: bool,
+    /// `/` filter is accepting keystrokes.
+    pub filter_input: bool,
+    /// Live query text — matched incrementally against process *or* host.
+    pub filter_text: String,
+}
+
 /// All UI-controlled state: the active tab, scroll/sort/selection state,
 /// chip-row filter selections, in-progress filter input buffers, modal
 /// flags (help/settings/memory_stats/geo), transient status messages with
@@ -70,6 +91,9 @@ pub struct AppCaches {
 /// without needing to spin up any collector threads.
 pub struct AppUiState {
     pub current_tab: Tab,
+    /// Full tabbed TUI vs the single-screen Lite view. Opt-in only.
+    pub view_mode: ViewMode,
+    pub lite: LiteState,
     pub scroll: UiScrollState,
     pub sort_states: HashMap<Tab, TabSortState>,
     pub sort_picker: SortPickerState,
@@ -135,6 +159,8 @@ impl AppUiState {
     pub fn from_config(cfg: &NetwatchConfig) -> Self {
         Self {
             current_tab: cfg.tab(),
+            view_mode: ViewMode::default(),
+            lite: LiteState::default(),
             scroll: UiScrollState::default(),
             sort_states: default_sort_states(),
             sort_picker: SortPickerState::default(),

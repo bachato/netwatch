@@ -23,7 +23,13 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let lines = build_help_lines(&app.theme);
+    // Lite gets its own compact key list — dumping the full TUI's ~40
+    // bindings into a view built around six keys would undercut the point.
+    let lines = if app.ui.view_mode == crate::app::ViewMode::Lite {
+        build_lite_help_lines(&app.theme)
+    } else {
+        build_help_lines(&app.theme)
+    };
 
     // Reserve 1 line for the footer hint
     let visible_height = inner.height.saturating_sub(1) as usize;
@@ -83,6 +89,39 @@ fn key_line(theme: &Theme, key: &str, desc: &str) -> Line<'static> {
         ),
         Span::styled(desc.to_string(), Style::default().fg(theme.text_primary)),
     ])
+}
+
+/// Lite's complete key surface — including the keys the footer deliberately
+/// doesn't advertise (navigation and `Esc`, which are `less`/`vim`/`top`
+/// conventions). This overlay is the one place the full set is written down.
+fn build_lite_help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    lines.push(section_header(theme, "NETWATCH LITE"));
+    lines.push(key_line(theme, "q / Ctrl+C", "Quit"));
+    lines.push(key_line(theme, "p", "Pause/resume"));
+    lines.push(key_line(theme, "/", "Filter by process or host"));
+    lines.push(key_line(theme, "↵", "Expand/collapse the selected talker"));
+    lines.push(key_line(theme, "L", "Switch to the full view"));
+    lines.push(key_line(theme, "?", "Toggle this overlay"));
+    lines.push(Line::from(""));
+
+    lines.push(section_header(theme, "NAVIGATION"));
+    lines.push(key_line(theme, "↑ / k", "Move selection up"));
+    lines.push(key_line(theme, "↓ / j", "Move selection down"));
+    lines.push(key_line(
+        theme,
+        "Esc",
+        "Close detail, then clear the filter",
+    ));
+    lines.push(Line::from(""));
+
+    lines.push(section_header(theme, "NOTES"));
+    // The overlay is ~64 columns wide; keep these inside it.
+    lines.push(key_line(theme, "RTT", "From captured TCP handshakes only"));
+    lines.push(key_line(theme, "HOST", "SNI when captured, else remote IP"));
+
+    lines
 }
 
 fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {

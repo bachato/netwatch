@@ -13,9 +13,24 @@ pub struct HealthStatus {
     pub gateway_loss_pct: f64,
     pub dns_rtt_ms: Option<f64>,
     pub dns_loss_pct: f64,
+    /// Reachability of a fixed public host beyond the local network.
+    ///
+    /// Distinguishes "my router is fine but the line is down" from "my router
+    /// is down" — gateway and DNS alone can't tell those apart, since a
+    /// working LAN with a dead uplink looks perfectly healthy on both.
+    pub internet_rtt_ms: Option<f64>,
+    pub internet_loss_pct: f64,
     pub gateway_rtt_history: VecDeque<Option<f64>>,
     pub dns_rtt_history: VecDeque<Option<f64>>,
+    pub internet_rtt_history: VecDeque<Option<f64>>,
 }
+
+/// Fixed target for the internet reachability probe.
+///
+/// 1.1.1.1 over 443: anycast (so the RTT reflects the nearest POP rather than
+/// a transcontinental hop), and the same ICMP→TCP fallback as the gateway
+/// probe applies — plenty of networks drop echo but pass TCP.
+const INTERNET_TARGET: &str = "1.1.1.1";
 
 pub struct HealthProber {
     /// Latest probe results, shared via the `Arc<RwLock<Arc<…>>>` snapshot
@@ -41,8 +56,11 @@ impl HealthProber {
                 gateway_loss_pct: 100.0,
                 dns_rtt_ms: None,
                 dns_loss_pct: 100.0,
+                internet_rtt_ms: None,
+                internet_loss_pct: 100.0,
                 gateway_rtt_history: VecDeque::new(),
                 dns_rtt_history: VecDeque::new(),
+                internet_rtt_history: VecDeque::new(),
             }))),
             busy: Arc::new(AtomicBool::new(false)),
         }
@@ -98,6 +116,21 @@ impl HealthProber {
                 next.dns_rtt_history.make_contiguous();
                 *safe_write(&snapshot, "health::probe::publish_dns") = Arc::new(next);
             }
+            {
+                // Same ICMP-then-TCP shape as the gateway probe: on hosts
+                // where unprivileged ICMP is unavailable, a 1-RTT TCP connect
+                // to 443 answers the same question without any privileges.
+                let (rtt, loss) = run_internet_probe(INTERNET_TARGET);
+                let mut next = (**safe_read(&snapshot, "health::probe::read_inet")).clone();
+                next.internet_rtt_ms = rtt;
+                next.internet_loss_pct = loss;
+                next.internet_rtt_history.push_back(rtt);
+                if next.internet_rtt_history.len() > RTT_HISTORY_MAX {
+                    next.internet_rtt_history.pop_front();
+                }
+                next.internet_rtt_history.make_contiguous();
+                *safe_write(&snapshot, "health::probe::publish_inet") = Arc::new(next);
+            }
             busy.store(false, Ordering::SeqCst);
         });
     }
@@ -128,6 +161,22 @@ fn run_gateway_probe(target: &str) -> (Option<f64>, f64) {
     // ICMP completely failed — could be sandbox/kernel restrictions,
     // could be a genuinely-firewalled host. Try TCP.
     run_tcp_probe(target)
+}
+
+/// Internet reachability probe: ICMP first, TCP/443 when ICMP is unavailable.
+///
+/// Mirrors [`run_gateway_probe`]'s structure but targets a single well-known
+/// port — unlike a router, a public anycast resolver has a predictable
+/// listener, so there's no port list to walk.
+fn run_internet_probe(target: &str) -> (Option<f64>, f64) {
+    let (rtt, loss) = run_ping(target);
+    if loss < 100.0 {
+        return (rtt, loss);
+    }
+    match target.parse::<std::net::IpAddr>() {
+        Ok(addr) => run_tcp_probe_port(addr, 443),
+        Err(_) => (None, 100.0),
+    }
 }
 
 /// TCP-connect probe used as the gateway-ICMP fallback. Walks a small list

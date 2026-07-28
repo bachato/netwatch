@@ -292,6 +292,20 @@ impl InterfaceFilter {
     }
 }
 
+/// Which of the two top-level views is rendering.
+///
+/// Lite is a deliberate counterpart to the full tabbed TUI: one screen at
+/// 80×24 answering "what's using my network, and is my connection OK?" It is
+/// **opt-in only** — entered with `--lite` or toggled with `L`, never
+/// auto-selected by terminal size. Both views share the same collectors and
+/// the same tick loop, so toggling is instant and no history is lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Full,
+    Lite,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Dashboard,
@@ -1244,8 +1258,12 @@ pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     remote: Option<&crate::remote::RemotePublisher>,
     sandbox_mode: crate::sandbox::Mode,
+    lite: bool,
 ) -> Result<()> {
     let mut app = App::new();
+    if lite {
+        app.ui.view_mode = ViewMode::Lite;
+    }
 
     // Apply the security sandbox after App::new finishes — pcap handles,
     // PKTAP attributor, and the eBPF kprobe are all up at this point, so
@@ -1322,17 +1340,20 @@ pub async fn run<B: Backend>(
                     area,
                 );
             }
-            match app.ui.current_tab {
-                Tab::Dashboard => ui::dashboard::render(f, &app, area),
-                Tab::Connections => ui::connections::render(f, &app, area),
-                Tab::Interfaces => ui::interfaces::render(f, &app, area),
-                Tab::Packets => ui::packets::render(f, &app, area),
-                Tab::Stats => ui::stats::render(f, &app, area),
-                Tab::Topology => ui::topology::render(f, &app, area),
-                Tab::Timeline => ui::timeline::render(f, &app, area),
-                Tab::Processes => ui::processes::render(f, &app, area),
-                Tab::Insights => ui::insights::render(f, &app, area),
-                Tab::Egress => ui::egress::render(f, &app, area),
+            match app.ui.view_mode {
+                ViewMode::Lite => ui::lite::render(f, &app, area),
+                ViewMode::Full => match app.ui.current_tab {
+                    Tab::Dashboard => ui::dashboard::render(f, &app, area),
+                    Tab::Connections => ui::connections::render(f, &app, area),
+                    Tab::Interfaces => ui::interfaces::render(f, &app, area),
+                    Tab::Packets => ui::packets::render(f, &app, area),
+                    Tab::Stats => ui::stats::render(f, &app, area),
+                    Tab::Topology => ui::topology::render(f, &app, area),
+                    Tab::Timeline => ui::timeline::render(f, &app, area),
+                    Tab::Processes => ui::processes::render(f, &app, area),
+                    Tab::Insights => ui::insights::render(f, &app, area),
+                    Tab::Egress => ui::egress::render(f, &app, area),
+                },
             }
             if app.ui.show_help {
                 ui::help::render(f, &app, area);
@@ -1549,6 +1570,112 @@ const TOP_CONN_HISTORY_LEN: usize = 30;
 /// Capture this tick's per-(process, host) RX rate into the rolling history
 /// used by the Dashboard's Top Connections sparkline. Evicts groups that
 /// disappear from the connection list to keep the map bounded.
+/// Lite's complete key surface.
+///
+/// Six keys are advertised in the footer (`q p / ↵ L ?`); navigation and `Esc`
+/// are deliberately unadvertised because they're conventions from
+/// `less`/`vim`/`top`. The `?` overlay lists everything.
+fn handle_lite_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    use crate::ui::lite;
+
+    // Filter input swallows printable keys, so it has to be checked first.
+    if app.ui.lite.filter_input {
+        match key.code {
+            KeyCode::Esc => {
+                app.ui.lite.filter_input = false;
+                app.ui.lite.filter_text.clear();
+                app.ui.lite.selected = 0;
+                app.ui.lite.offset = 0;
+            }
+            // Commit the filter but keep it applied — the list stays narrowed
+            // so ↵ can then open detail on a match.
+            KeyCode::Enter => app.ui.lite.filter_input = false,
+            KeyCode::Backspace => {
+                app.ui.lite.filter_text.pop();
+                app.ui.lite.selected = 0;
+                app.ui.lite.offset = 0;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char(c) => {
+                app.ui.lite.filter_text.push(c);
+                app.ui.lite.selected = 0;
+                app.ui.lite.offset = 0;
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    let talkers = lite::filter_talkers(lite::collect_talkers(app), &app.ui.lite.filter_text);
+    let count = talkers.len();
+    let visible = lite::Layout::new(app.ui.last_area).visible_talkers(app.ui.lite.detail_open);
+
+    match key.code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('L') => {
+            app.ui.view_mode = ViewMode::Full;
+            app.ui.lite.detail_open = false;
+            app.ui.lite.filter_input = false;
+        }
+        KeyCode::Char('?') => app.ui.show_help = true,
+        KeyCode::Char('p') => app.ui.paused = !app.ui.paused,
+        KeyCode::Char('/') => {
+            app.ui.lite.filter_input = true;
+            app.ui.lite.filter_text.clear();
+        }
+        KeyCode::Enter => app.ui.lite.detail_open = !app.ui.lite.detail_open,
+        KeyCode::Esc => {
+            // Esc unwinds one layer at a time: detail, then the filter.
+            if app.ui.lite.detail_open {
+                app.ui.lite.detail_open = false;
+            } else if !app.ui.lite.filter_text.is_empty() {
+                app.ui.lite.filter_text.clear();
+                app.ui.lite.selected = 0;
+                app.ui.lite.offset = 0;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if count > 0 {
+                app.ui.lite.selected = (app.ui.lite.selected + 1).min(count - 1);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.ui.lite.selected = app.ui.lite.selected.saturating_sub(1);
+        }
+        _ => {}
+    }
+
+    clamp_lite_scroll(app, count, visible);
+    false
+}
+
+/// Keep the selection inside the visible window, and — when detail is open —
+/// far enough from the bottom that its three rows fit before the prompt row.
+fn clamp_lite_scroll(app: &mut App, count: usize, visible: u16) {
+    let lite = &mut app.ui.lite;
+    if count == 0 {
+        lite.selected = 0;
+        lite.offset = 0;
+        return;
+    }
+    lite.selected = lite.selected.min(count - 1);
+    let visible = visible.max(1) as usize;
+
+    if lite.selected < lite.offset {
+        lite.offset = lite.selected;
+    }
+    // The detail block consumes rows *below* the selected row, so when it's
+    // open the selection must sit at least DETAIL_ROWS above the window
+    // bottom. `visible` already excludes those rows, so the same arithmetic
+    // covers both cases.
+    if lite.selected >= lite.offset + visible {
+        lite.offset = lite.selected + 1 - visible;
+    }
+    let max_offset = count.saturating_sub(visible);
+    lite.offset = lite.offset.min(max_offset);
+}
+
 fn update_top_conn_history(
     history: &mut HashMap<(String, String), VecDeque<u64>>,
     conns: &[Connection],
@@ -1919,6 +2046,12 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     // Overlays intercept first
     if app.ui.show_help {
         return handle_help_key(app, key);
+    }
+    // Lite owns its whole key surface — the full TUI's ~40 bindings would
+    // undermine the point of the view. Handled after the help overlay so `?`
+    // still works, and before everything else.
+    if app.ui.view_mode == ViewMode::Lite {
+        return handle_lite_key(app, key);
     }
     if app.ui.show_settings {
         return handle_settings_key(app, key);
@@ -2296,6 +2429,8 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         KeyCode::Char('E') => {
             app.export_incident_bundle();
         }
+        // The other half of the Lite toggle; `handle_lite_key` owns Lite→Full.
+        KeyCode::Char('L') => app.ui.view_mode = ViewMode::Lite,
         KeyCode::Char('1') => app.ui.current_tab = Tab::Dashboard,
         KeyCode::Char('2') => app.ui.current_tab = Tab::Connections,
         KeyCode::Char('3') => app.ui.current_tab = Tab::Interfaces,

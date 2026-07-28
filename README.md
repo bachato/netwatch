@@ -139,6 +139,16 @@ Ten tabs, switched with `1`–`9` and `0`:
 
 The Packets tab is where the forensics live — deep protocol decoding, live TLS 1.3 decryption, JA4 threat-hunting, Wireshark-style display filters, and incident capture. **[See the full feature reference →](docs/REFERENCE.md)**
 
+### Lite view
+
+Ten tabs is an operator's instrument. When the question is just *"what's using my network, and is my connection OK?"* — one machine, an SSH session to a Pi, a tmux split — there's `--lite`:
+
+```bash
+netwatch --lite     # one screen, fits 80×24
+```
+
+Everything on a single screen: live throughput charts, gateway/DNS/internet reachability, and the top talkers by process and host. Six keys — `q` quit, `p` pause, `/` filter, `↵` expand a talker, `L` back to the full view, `?` help. Press `L` from either view to switch; both share the same collectors, so nothing restarts and no history is lost.
+
 ## Deeper dives
 
 | Guide | What's in it |

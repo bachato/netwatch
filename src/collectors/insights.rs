@@ -496,8 +496,11 @@ mod tests {
             gateway_loss_pct: 0.0,
             dns_rtt_ms: Some(10.0),
             dns_loss_pct: 0.0,
+            internet_rtt_ms: Some(12.0),
+            internet_loss_pct: 0.0,
             gateway_rtt_history: VecDeque::new(),
             dns_rtt_history: VecDeque::new(),
+            internet_rtt_history: VecDeque::new(),
         }
     }
 

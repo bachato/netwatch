@@ -4,6 +4,7 @@ pub mod egress;
 pub mod help;
 pub mod insights;
 pub mod interfaces;
+pub mod lite;
 pub mod memory_stats;
 pub mod packets;
 pub mod processes;

@@ -4,6 +4,18 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Lite view (`--lite`, or `L` to toggle).** A single 80×24 screen for the
+  one-machine case — throughput charts, gateway/DNS/internet reachability, and
+  top talkers by process and host, with six keys. It shares the full TUI's
+  collectors, so toggling between the two keeps all history. Also gives the
+  small-terminal case a coherent rendering: the full TUI has no global minimum
+  size and degrades silently below ~130×36.
+- **Internet reachability probe.** `HealthStatus` gains `internet_rtt_ms` /
+  `internet_loss_pct`, probing 1.1.1.1 with the same ICMP→TCP fallback the
+  gateway probe uses. Distinguishes "the router is fine but the line is down"
+  from "the router is down" — gateway and DNS alone can't tell those apart.
+
 ## [0.26.1] - 2026-07-04
 
 ### Fixed
