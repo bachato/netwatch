@@ -18,7 +18,7 @@
 //! tokens Lite uses, not which values it burns in.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -88,20 +88,6 @@ pub fn spark_bucket(i: u16, samples: usize) -> std::ops::Range<usize> {
     let lo = (i as usize * samples) / SPARK_W as usize;
     let hi = ((i as usize + 1) * samples) / SPARK_W as usize;
     lo..hi.max(lo + 1)
-}
-
-/// Bar-chart column heights, in eighth-row sub-units.
-///
-/// Returns `(full_cells, remainder)` — draw `full_cells` full blocks from the
-/// bottom, then one partial block of height `remainder` (1..=7) above them.
-pub fn bar_cells(v: f64, max: f64, h: u16) -> (u16, u16) {
-    if max <= 0.0 || v <= 0.0 {
-        return (0, 0);
-    }
-    let subs = ((v / max) * h as f64 * 8.0)
-        .round()
-        .clamp(0.0, (h * 8) as f64) as u16;
-    (subs / 8, subs % 8)
 }
 
 // ── Talker table ────────────────────────────────────────────────────────────
@@ -542,55 +528,60 @@ fn put_right(f: &mut Frame, x_end: u16, y: u16, s: &str, style: Style) {
     put(f, x, y, s, style, x_end);
 }
 
-const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-/// Stacked block bar chart — one sample per column, no interpolation.
-fn draw_chart(f: &mut Frame, x: u16, y: u16, w: u16, h: u16, data: &[u64], style: Style) {
-    if data.is_empty() {
-        return;
+/// Left-pad a history with zeros to exactly `width` samples.
+///
+/// Required before handing data to the graph module: `render_bars` right-aligns
+/// a short series but `render_dots` indexes cells directly and left-aligns it,
+/// so an unpadded series renders in the wrong half of the chart under one style
+/// and not the other. Padding to the exact width makes `now` land on the right
+/// edge under both, and matches what every other chart call site does.
+fn pad_to_width(data: &[u64], width: usize) -> Vec<u64> {
+    if width == 0 {
+        return Vec::new();
     }
-    // One sample per column, right-aligned so `now` sits at the right edge.
-    let take = (w as usize).min(data.len());
-    let slice = &data[data.len() - take..];
-    let max = slice.iter().copied().max().unwrap_or(1).max(1) as f64;
-    let x0 = x + (w - take as u16);
-
-    for (i, &v) in slice.iter().enumerate() {
-        let (full, rem) = bar_cells(v as f64, max, h);
-        for row in 0..h {
-            let from_bottom = h - 1 - row;
-            let ch = if from_bottom < full {
-                '█'
-            } else if from_bottom == full && rem > 0 {
-                BLOCKS[(rem - 1) as usize]
-            } else {
-                continue;
-            };
-            f.buffer_mut()
-                .set_string(x0 + i as u16, y + row, ch.to_string(), style);
-        }
+    if data.len() >= width {
+        return data[data.len() - width..].to_vec();
     }
+    let mut out = vec![0u64; width - data.len()];
+    out.extend_from_slice(data);
+    out
 }
 
-/// Row sparkline — each column is the **max** over its bucket, so a spike
-/// anywhere in the bucket survives. Sampling would drop most of the history.
-fn draw_sparkline(f: &mut Frame, x: u16, y: u16, data: &[u64], style: Style) {
+/// Collapse a history of any length to exactly [`SPARK_W`] values, taking the
+/// **max** of each bucket so a spike anywhere inside it survives.
+///
+/// This has to happen before the graph module sees the data: `render_bars`
+/// keeps only the last `width` samples and discards the rest, which for a
+/// 30-sample history in a 9-column cell would throw away 21 of them.
+fn bucket_history(data: &[u64]) -> Vec<u64> {
+    (0..SPARK_W)
+        .map(|i| {
+            let b = spark_bucket(i, data.len());
+            data[b.start..b.end.min(data.len())]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Row sparkline, rendered through the shared graph module so it follows the
+/// app-wide bars/dots setting like every other chart.
+fn draw_sparkline(f: &mut Frame, app: &App, x: u16, y: u16, data: &[u64], color: Color) {
     if data.is_empty() {
         return;
     }
-    let max = data.iter().copied().max().unwrap_or(1).max(1) as f64;
-    let mut s = String::new();
-    for i in 0..SPARK_W {
-        let b = spark_bucket(i, data.len());
-        let peak = data[b.start..b.end.min(data.len())]
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
-        let idx = ((peak as f64 / max) * 7.0).round().clamp(0.0, 7.0) as usize;
-        s.push(BLOCKS[idx]);
-    }
-    f.buffer_mut().set_string(x, y, s, style);
+    let bucketed = bucket_history(data);
+    crate::graph::render(
+        f,
+        Rect::new(x, y, SPARK_W, 1),
+        &bucketed,
+        app.graph_style,
+        color,
+        app.theme.status_warn,
+        app.graph_opts(),
+    );
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
@@ -812,14 +803,20 @@ fn render_throughput(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
         };
         put_right(f, end, y_label, &ctx, Style::default().fg(t.text_secondary));
 
-        draw_chart(
+        // Route through the shared graph module so Lite honours the app-wide
+        // `graph_style` (bars / btop-style braille dots) and `graph_fade`
+        // settings, exactly like every other chart. `t` in the loop tuple is
+        // only the fallback colour; the style itself comes from config.
+        let series_color = if paused { t.text_muted } else { series };
+        let _ = chart_style;
+        crate::graph::render(
             f,
-            l.content_x,
-            y_chart,
-            l.content_w,
-            h,
-            &samples,
-            chart_style,
+            Rect::new(l.content_x, y_chart, l.content_w, h),
+            &pad_to_width(&samples, l.content_w as usize),
+            app.graph_style,
+            series_color,
+            t.status_warn,
+            app.graph_opts(),
         );
     }
 }
@@ -1015,10 +1012,11 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
         put_right(f, l.x_rtt + W_RTT - 1, y, &rtt, secondary);
         draw_sparkline(
             f,
+            app,
             l.x_spark,
             y,
             &talker.history,
-            Style::default().fg(if selected { t.rx_rate } else { t.text_muted }),
+            if selected { t.rx_rate } else { t.text_muted },
         );
         y += 1;
 
@@ -1470,14 +1468,28 @@ mod tests {
     }
 
     #[test]
-    fn bar_cells_span_the_chart_height() {
-        assert_eq!(bar_cells(0.0, 10.0, 3), (0, 0));
-        assert_eq!(bar_cells(10.0, 10.0, 3), (3, 0));
-        let (full, rem) = bar_cells(5.0, 10.0, 3);
-        assert_eq!(full, 1);
-        assert_eq!(rem, 4);
-        // Never overflow the chart, even if a sample beats the sticky max.
-        let (full, rem) = bar_cells(99.0, 10.0, 2);
-        assert!(full <= 2 && (full < 2 || rem == 0));
+    fn padding_anchors_the_newest_sample_to_the_right_edge() {
+        // Short history left-pads with zeros so `now` lands on the right edge
+        // under both bars (which right-aligns) and dots (which does not).
+        let padded = pad_to_width(&[7, 8, 9], 6);
+        assert_eq!(padded, vec![0, 0, 0, 7, 8, 9]);
+        // Over-long history keeps the newest samples, not the oldest.
+        assert_eq!(pad_to_width(&[1, 2, 3, 4, 5], 3), vec![3, 4, 5]);
+        assert_eq!(pad_to_width(&[1, 2, 3], 3), vec![1, 2, 3]);
+        assert!(pad_to_width(&[1, 2, 3], 0).is_empty());
+    }
+
+    #[test]
+    fn bucketing_yields_exactly_one_value_per_sparkline_column() {
+        // The graph module keeps only the last `width` samples, so the
+        // bucketing has to hand it a pre-collapsed series of exactly SPARK_W.
+        for len in [1usize, 5, 9, 30, 78, 600] {
+            let data: Vec<u64> = (0..len as u64).collect();
+            assert_eq!(
+                bucket_history(&data).len(),
+                SPARK_W as usize,
+                "history of {len} produced the wrong column count"
+            );
+        }
     }
 }
