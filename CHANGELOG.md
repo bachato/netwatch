@@ -27,6 +27,59 @@ All notable changes to NetWatch will be documented in this file.
 - Lite honours the app-wide `graph_style` / `graph_fade` settings. Its charts
   and sparklines previously hardcoded block glyphs and ignored both.
 
+## [0.27.0] - 2026-07-26
+
+Process identity becomes stable enough to key a policy on, and the egress linter
+stops reporting drift it invented. Plus a theme for people who already have a
+system-wide color scheme. (#44)
+
+### Added
+- **`terminal` theme — defers entirely to your terminal's palette.** For anyone
+  running pywal, matugen, or a tuned terminal profile who wants NetWatch to follow
+  along rather than impose its own colors. `dark` was already close (ANSI named
+  colors, `bg: Reset`); this goes further where theme-matching actually breaks:
+  `text_primary` is `Reset` (your exact configured foreground, not the white slot)
+  and both selection backgrounds drop fixed RGB for `Indexed(8)`. Nothing in the
+  theme pins an RGB value — a test enforces that. Accepts `system` and `ansi` as
+  aliases. `dark` remains the default.
+- **Security policy** (`SECURITY.md`): private reporting channel and threat-model
+  scope.
+
+### Fixed
+- **Process identity now derives from the executable, not `comm`.** Two separate
+  instabilities made names unusable as a policy key: the kernel truncates `comm`
+  (16 bytes on macOS, 15 on Linux), so `Google Chrome Helper` and
+  `Google Chrome Helper (GPU)` both arrived as `Google Chrome He`; and `lsof`
+  reports the executable's filename, which for version-installed tools *is the
+  version* — Claude Code appeared under six different names on one machine, with
+  every upgrade minting another and orphaning any policy promoted for it. Identity
+  now comes from the executable path (`proc_pidpath` / `/proc/<pid>/exe`), falling
+  back to the nearest meaningful parent directory when the file itself is named
+  like a bare version. Not `argv[0]` — any process can set that, which would let a
+  program inherit another's rules by renaming itself. Measured on live
+  connections: 19 distinct names → 15.
+- **Blank destinations no longer warn as drift.** Processes appeared as `✗ drift`
+  with no destination and no IP, and a violation message reading literally
+  " not in allowlist". Four compounding defects: `parse_addr_parts(":443")`
+  returned `Some("")` instead of `None`; `is_private_ip("")` is false so `observe()`
+  let it through both guards; `upsert` overwrote a known `last_ip` with an empty
+  one; and `violation()` built its subject as `sni.or(asn).unwrap_or(ip)`, yielding
+  an empty string. Existing baselines repair without a migration.
+- **The same program is no longer profiled twice under truncated and full names.**
+  PKTAP carries a kernel-truncated `comm` while `lsof` reports the full name, so
+  whichever attribution source won a tick decided the profile key — on one machine
+  `Google Chrome He` and `Google Chrome Helper` held 16 and 12 destinations with
+  only 7 in common, so promoting one ratified a baseline the other immediately
+  drifted against. Names now fold onto one key, with hit counts and violation
+  tallies carrying across the merge. VS Code's genuine `Code Helper` correctly
+  stays separate from the truncated `Code Helper (Plu`.
+- The per-process destination cap silently dropped entries at load, resurfacing
+  later as drift for traffic that was still happening. It now warns once per load
+  with the counts.
+
+### Changed
+- Install docs point at homebrew-core, Nix, AUR and Scoop.
+
 ## [0.26.1] - 2026-07-04
 
 ### Fixed
