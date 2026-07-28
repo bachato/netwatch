@@ -228,7 +228,11 @@ fn render_dots(
             let pix_y_from_top = (pix_h - 1) - fill;
             let cell_y = pix_y_from_top / 4;
             let row_in_cell = pix_y_from_top % 4;
-            masks[cell_y][i] |= 1 << BRAILLE_BIT[0][row_in_cell];
+            // Fill both sub-columns. Lighting only the left one leaves every
+            // cell half-empty, which reads as a sparse dot-matrix rather than
+            // the filled area this style is meant to produce.
+            masks[cell_y][i] |=
+                (1 << BRAILLE_BIT[0][row_in_cell]) | (1 << BRAILLE_BIT[1][row_in_cell]);
         }
     }
 
@@ -399,6 +403,40 @@ fn render_grid(buf: &mut Buffer, area: Rect, bg: Color, defer_to_terminal: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full-height sample must light every dot in its braille cell.
+    ///
+    /// Filling only `BRAILLE_BIT[0]` yields `⡇` (left sub-column, 0x2847) and
+    /// the chart reads as a sparse dot matrix instead of a filled area.
+    #[test]
+    fn dots_fill_both_braille_sub_columns() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        render_dots(
+            &mut buf,
+            area,
+            &[10],
+            10,
+            Color::Green,
+            GraphOpts::default(),
+        );
+        assert_eq!(
+            buf.get(0, 0).symbol(),
+            "⣿",
+            "a full-height sample should light all 8 dots, not just the left column"
+        );
+    }
+
+    /// Partial heights must still span the cell horizontally — only the
+    /// vertical extent should vary with the value.
+    #[test]
+    fn dots_partial_height_still_spans_the_cell() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        // Bottom quarter only: dots 7 and 8 (bits 6 and 7) → 0x28C0.
+        render_dots(&mut buf, area, &[1], 10, Color::Green, GraphOpts::default());
+        assert_eq!(buf.get(0, 0).symbol(), "⣀");
+    }
 
     #[test]
     fn by_name_falls_back_to_bars() {
