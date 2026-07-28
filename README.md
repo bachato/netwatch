@@ -31,9 +31,11 @@ Most network tools answer one question — *"what's using my bandwidth?"* — an
 
 Think of it as **one zero-config binary that does the job of a bandwidth meter, the triage view of Wireshark, and a lightweight intrusion detector** — without leaving the terminal.
 
+It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen](#lite-view) for *"what's using my network right now?"*; the full ten-tab view is there when the answer is "something I need to investigate" — one keypress apart, sharing the same live capture.
+
 **Made for** blue-teamers, incident responders, SREs, and homelabbers who need to see what's happening *right now* — not parse a capture file an hour later.
 
-<samp>500+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
+<samp>590+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
 
 <p align="center">
   <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, live packet capture and decode, network topology with traceroute, and automatic alerting" width="820">
@@ -52,6 +54,7 @@ Think of it as **one zero-config binary that does the job of a bandwidth meter, 
 - 📡 **Decode the protocols, not just the ports** — real L7 parsing of TLS, QUIC, HTTP, and DNS (plus an SSH banner/version sniff) and a dozen more, with per-flow stream tracking and handshake timing — so you see `api.github.com` and the JA4 fingerprint, not just "port 443."
 - 🎥 **Freeze the evidence** — arm a rolling recorder and freeze any incident into a portable bundle: the packets *plus* the connections, DNS, health, and alerts that explain them. Built for bug reports and post-mortems.
 - 🛡️ **Safe by design** — after setup, NetWatch drops its privileges and locks itself into a Landlock filesystem allow-list (Linux). A tool that parses hostile traffic *cannot* read your SSH keys, browser profiles, or `/etc/shadow`.
+- 🪟 **Scales down to one screen** — `--lite` answers *"what's using my network, and is my connection OK?"* on a single 80×24 screen with six keys, so it fits an SSH session to a Pi or a tmux split. One keypress escalates to the full forensics view with the collectors already warm.
 
 **No config files. No setup. No flags required.**
 
@@ -147,7 +150,17 @@ Ten tabs is an operator's instrument. When the question is just *"what's using m
 netwatch --lite     # one screen, fits 80×24
 ```
 
-Everything on a single screen: live throughput charts, gateway/DNS/internet reachability, and the top talkers by process and host. Six keys — `q` quit, `p` pause, `/` filter, `↵` expand a talker, `L` back to the full view, `?` help. Press `L` from either view to switch; both share the same collectors, so nothing restarts and no history is lost.
+<p align="center">
+  <img src="demo-lite.gif" alt="NetWatch Lite: one 80×24 screen showing live throughput charts, gateway/DNS/internet reachability, and top talkers by process and host — expanding a connection in place and filtering it live" width="820">
+</p>
+
+<p align="center">
+  <em>One screen, six keys. Live throughput, reachability, and who's talking — expand any row in place, filter as you type.</em>
+</p>
+
+Everything on a single screen: live throughput charts, gateway/DNS/internet reachability, and the top talkers by process and host. Six keys — `q` quit, `p` pause, `/` filter, `↵` expand a talker, `L` back to the full view, `?` help.
+
+Press `L` from either view to switch. Both share the same collectors, so escalating from "something looks off" to the full ten-tab forensics view costs one keypress — no restart, no lost history, capture still running.
 
 ## Deeper dives
 
