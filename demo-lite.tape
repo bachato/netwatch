@@ -34,8 +34,13 @@ Set Padding 10
 #   - `netwatch` on PATH may be an older installed copy. The shim below points
 #     it at this repo's release build for the recording only, so the GIF shows
 #     the command users actually type without touching ~/.cargo/bin.
+#   - HOME is redirected to a scratch tree pinning `theme = "terminal"`, so the
+#     colours come from the terminal palette rather than netwatch's own. Without
+#     this the GIF inherits whatever theme the operator happens to have set.
 Hide
 Type "export PATH=$PWD/target/release:$PATH"
+Enter
+Type "export HOME=$(./scripts/demo-lite-env.sh)"
 Enter
 Type "(sleep 6; ./scripts/demo-lite-traffic.sh >/dev/null 2>&1) &"
 Enter
