@@ -1669,7 +1669,13 @@ fn clamp_scroll(current: usize, delta: isize, max: usize) -> usize {
     ((current as isize + delta).max(0) as usize).min(max)
 }
 
-const TOP_CONN_HISTORY_LEN: usize = 30;
+/// Samples retained per (process, host) group for the in-row sparklines.
+///
+/// Public because the Lite view labels that column with the window it actually
+/// covers, which is this many samples — *not* the chart width. The two series
+/// have different depths and mislabelling one for the other is exactly the bug
+/// the derived label exists to prevent.
+pub const TOP_CONN_HISTORY_LEN: usize = 30;
 
 /// Capture this tick's per-(process, host) RX rate into the rolling history
 /// used by the Dashboard's Top Connections sparkline. Evicts groups that

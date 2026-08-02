@@ -74,14 +74,37 @@ pub const MAX_SEL_WITH_DETAIL: u16 = TALKER_ROWS_DETAIL - 1;
 
 // ── History ─────────────────────────────────────────────────────────────────
 
-/// Ring buffer depth, sampled at 1 Hz. Deliberately equal to [`CONTENT_W`] so
-/// each chart column is exactly one sample — no interpolation, no doubled bars.
-/// The axis is therefore labelled `78s ago`, not `60s ago`.
+/// Chart ring-buffer depth. Deliberately equal to [`CONTENT_W`] so each chart
+/// column is exactly one sample — no interpolation, no doubled bars.
+///
+/// One sample per *refresh tick*, not per second: `refresh_rate_ms` is
+/// configurable, so the axis label is computed by [`window_label`] rather than
+/// printing the sample count.
 pub const HISTORY_SAMPLES: usize = CONTENT_W as usize;
 
 /// Per-row sparkline width. Each column is a *bucket max* over the history —
 /// sampling instead would discard 69 of 78 values and hide every spike.
 pub const SPARK_W: u16 = 9;
+
+/// Format the wall-clock window that `samples` covers, given the tick interval.
+///
+/// History gains one sample per refresh tick, and `refresh_rate_ms` is
+/// user-configurable (100–5000ms) — so sample count is *not* seconds. Labelling
+/// a 78-sample chart "78s" is only right at the 1000ms default; at 500ms the
+/// same chart covers 39 seconds. Both the axis and the sparkline header derive
+/// their label through here so neither can drift from the data again.
+pub fn window_label(samples: usize, refresh_rate_ms: u64) -> String {
+    let secs = (samples as u64 * refresh_rate_ms) as f64 / 1000.0;
+    if secs >= 120.0 {
+        format!("{}m", (secs / 60.0).round() as u64)
+    } else if secs >= 10.0 {
+        format!("{}s", secs.round() as u64)
+    } else {
+        // Sub-10s windows round badly to whole seconds — a 100ms refresh over
+        // 30 samples is 3 seconds, and "3s" beats "3.0s".
+        format!("{}s", secs.max(1.0).round() as u64)
+    }
+}
 
 /// Samples covered by sparkline column `i`, as a half-open range.
 pub fn spark_bucket(i: u16, samples: usize) -> std::ops::Range<usize> {
@@ -148,7 +171,11 @@ pub const FIELDS: &[Field] = &[
         align: Align::Right,
     },
     Field {
-        header: "60s",
+        // Placeholder only. The rendered header is computed at draw time from
+        // the sparkline's own depth (`TOP_CONN_HISTORY_LEN`) and the refresh
+        // rate — it is a different window from the charts above, and neither
+        // is a fixed number of seconds.
+        header: "30s",
         x: 70,
         w: SPARK_W,
         align: Align::Left,
@@ -603,7 +630,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     render_header(f, app, &l, &health, unhealthy, paused);
     render_throughput(f, app, &l, paused);
-    render_axis(f, t, &l);
+    render_axis(f, app, t, &l);
     render_health_line(f, t, &l, &health, unhealthy);
     render_table(f, app, &l, paused);
     render_footer(f, t, &l, app);
@@ -821,12 +848,16 @@ fn render_throughput(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
     }
 }
 
-fn render_axis(f: &mut Frame, t: &Theme, l: &Layout) {
+fn render_axis(f: &mut Frame, app: &App, t: &Theme, l: &Layout) {
     let rule: String = "─".repeat(l.content_w as usize);
     let style = Style::default().fg(t.text_muted);
     put(f, l.content_x, ROW_AXIS, &rule, style, l.content_x_end());
-    // One sample per column, so the window is exactly as wide as the chart.
-    let left = format!(" {}s ago ", l.content_w);
+    // One sample per column, so the window is the chart width in samples —
+    // converted to wall-clock, since a sample is one refresh tick, not a second.
+    let left = format!(
+        " {} ago ",
+        window_label(l.content_w as usize, app.user_config.refresh_rate_ms)
+    );
     put(
         f,
         l.content_x,
@@ -919,7 +950,21 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
     put_right(f, l.x_down + W_RATE - 1, ROW_TABLE_HEAD, "DOWN", head);
     put_right(f, l.x_up + W_RATE - 1, ROW_TABLE_HEAD, "UP", head);
     put_right(f, l.x_rtt + W_RTT - 1, ROW_TABLE_HEAD, "RTT", head);
-    put(f, l.x_spark, ROW_TABLE_HEAD, "60s", head, end);
+    // Derived, like the axis label — but from the sparkline's OWN depth, which
+    // is the per-group history cap, not the chart width. The two series have
+    // different depths, so reusing the chart's number here would trade a
+    // hardcoded wrong label for a derived one.
+    put(
+        f,
+        l.x_spark,
+        ROW_TABLE_HEAD,
+        &window_label(
+            crate::app::TOP_CONN_HISTORY_LEN,
+            app.user_config.refresh_rate_ms,
+        ),
+        head,
+        end,
+    );
 
     let rule: String = "─".repeat(l.content_w as usize);
     put(
@@ -1465,6 +1510,35 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(b, 1_000_000, "the spike was sampled away");
+    }
+
+    #[test]
+    fn window_label_converts_samples_to_wall_clock() {
+        // A sample is one refresh tick, not one second. At the 1000ms default
+        // the numbers coincide; at any other rate they must not.
+        assert_eq!(window_label(78, 1000), "78s");
+        assert_eq!(window_label(78, 500), "39s");
+        assert_eq!(window_label(78, 2000), "3m");
+        // The sparkline's window is its own depth, not the chart width.
+        assert_eq!(window_label(30, 1000), "30s");
+        assert_eq!(window_label(30, 500), "15s");
+        // Never renders a zero-second window at the fastest refresh.
+        assert_eq!(window_label(30, 100), "3s");
+        assert_eq!(window_label(1, 100), "1s");
+    }
+
+    #[test]
+    fn chart_and_sparkline_windows_are_labelled_independently() {
+        // The bug this guards: reusing the chart width for the sparkline
+        // header. They are different depths and must never print the same
+        // number unless the depths genuinely coincide.
+        let rate = 1000;
+        let chart = window_label(CONTENT_W as usize, rate);
+        let spark = window_label(crate::app::TOP_CONN_HISTORY_LEN, rate);
+        assert_ne!(
+            chart, spark,
+            "chart and sparkline cover different windows and must be labelled separately"
+        );
     }
 
     #[test]
