@@ -376,6 +376,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         undeclared,
         no_rule,
         asn_wide,
+        drift,
     } = tally(&rows);
 
     let mut extra = vec![
@@ -394,6 +395,12 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     if app.egress_profiler.has_policy() {
+        if drift > 0 {
+            extra.push(Span::styled(
+                format!("  ·  {drift} drift"),
+                Style::default().fg(t.status_error).bold(),
+            ));
+        }
         if undeclared > 0 {
             extra.push(Span::styled(
                 format!("  ·  {undeclared} undeclared"),
@@ -412,7 +419,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t.status_warn).bold(),
             ));
         }
-        if undeclared == 0 && no_rule == 0 && asn_wide == 0 {
+        if drift == 0 && undeclared == 0 && no_rule == 0 && asn_wide == 0 {
             extra.push(Span::styled(
                 "  ·  policy: all precise",
                 Style::default().fg(t.status_good),
@@ -439,6 +446,12 @@ struct Tally {
     undeclared: usize,
     no_rule: usize,
     asn_wide: usize,
+    /// Destinations outside the allowlist. Counted here because the summary
+    /// used to omit it entirely, and a screen whose only finding was drift
+    /// rendered "all precise" in the good colour directly above a red
+    /// `✗ drift` row. A reassuring summary contradicting the alarming detail
+    /// is the one failure a policy linter cannot afford.
+    drift: usize,
 }
 
 fn tally(rows: &[EgressRow<'_>]) -> Tally {
@@ -446,6 +459,7 @@ fn tally(rows: &[EgressRow<'_>]) -> Tally {
         undeclared: 0,
         no_rule: 0,
         asn_wide: 0,
+        drift: 0,
     };
     for r in rows {
         match r {
@@ -461,6 +475,10 @@ fn tally(rows: &[EgressRow<'_>]) -> Tally {
                 verdict: Verdict::Asn(_),
                 ..
             } => out.asn_wide += 1,
+            EgressRow::Dest {
+                verdict: Verdict::Drift,
+                ..
+            } => out.drift += 1,
             _ => {}
         }
     }
@@ -494,6 +512,7 @@ fn summary_line(app: &App, rows: &[EgressRow<'_>]) -> Line<'static> {
         undeclared,
         no_rule,
         asn_wide,
+        drift,
     } = tally(rows);
 
     let mut spans = vec![
@@ -510,6 +529,12 @@ fn summary_line(app: &App, rows: &[EgressRow<'_>]) -> Line<'static> {
         ));
     }
     if app.egress_profiler.has_policy() {
+        if drift > 0 {
+            spans.push(Span::styled(
+                format!(" · {drift} drift"),
+                Style::default().fg(t.status_error).bold(),
+            ));
+        }
         if undeclared > 0 {
             spans.push(Span::styled(
                 format!(" · {undeclared} undeclared"),
@@ -528,7 +553,7 @@ fn summary_line(app: &App, rows: &[EgressRow<'_>]) -> Line<'static> {
                 Style::default().fg(t.status_warn).bold(),
             ));
         }
-        if undeclared == 0 && no_rule == 0 && asn_wide == 0 {
+        if drift == 0 && undeclared == 0 && no_rule == 0 && asn_wide == 0 {
             spans.push(Span::styled(
                 " · all precise",
                 Style::default().fg(t.status_good),
@@ -987,6 +1012,61 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use super::{tally, EgressRow, Tally};
+    use crate::collectors::egress::{EgressDest, Verdict};
+    use std::collections::VecDeque;
+    use std::time::SystemTime;
+
+    fn dest(sni: &str) -> EgressDest {
+        EgressDest {
+            sni: Some(sni.to_string()),
+            asn_org: None,
+            port: 443,
+            last_ip: "203.0.113.5".into(),
+            ech: false,
+            first_seen: SystemTime::UNIX_EPOCH,
+            last_seen: SystemTime::UNIX_EPOCH,
+            count: 1,
+            bytes_out: 0,
+            bytes_in: 0,
+            activity: VecDeque::new(),
+        }
+    }
+
+    /// A drift row must be counted by the summary.
+    ///
+    /// It was not. `Tally` counted undeclared, unchecked and ASN-wide but not
+    /// drift, so a screen whose only finding was drift rendered a green
+    /// "all precise" directly above a red `✗ drift` row — the summary
+    /// contradicting the detail it summarises. Caught while recording the
+    /// README demo, which is a poor substitute for a test, hence this one.
+    #[test]
+    fn tally_counts_drift_and_withholds_all_precise() {
+        let ok = dest("ok.example.com");
+        let bad = dest("new.example.com");
+        let rows = vec![
+            EgressRow::Dest {
+                process: "curl",
+                label: "ok.example.com",
+                dest: &ok,
+                verdict: Verdict::Sni,
+            },
+            EgressRow::Dest {
+                process: "curl",
+                label: "new.example.com",
+                dest: &bad,
+                verdict: Verdict::Drift,
+            },
+        ];
+        let t: Tally = tally(&rows);
+        assert_eq!(t.drift, 1, "drift row was not counted");
+        assert_eq!(t.undeclared, 0);
+        assert_eq!(t.no_rule, 0);
+        assert_eq!(t.asn_wide, 0);
+        // "all precise" renders only when every counter is zero, so a
+        // non-zero drift count is exactly what suppresses it.
+        assert!(t.drift > 0);
+    }
 
     /// The sort picker hands back an index into `COLUMNS`; `app.rs` turns that
     /// index into an `EgressSort` by indexing `EgressSort::ALL`. If the two

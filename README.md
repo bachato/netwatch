@@ -35,7 +35,7 @@ It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen
 
 **Made for** blue-teamers, incident responders, SREs, and homelabbers who need to see what's happening *right now* — not parse a capture file an hour later.
 
-<samp>590+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
+<samp>650+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
 
 <p align="center">
   <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, live packet capture and decode, network topology with traceroute, and automatic alerting" width="820">
@@ -48,6 +48,7 @@ It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen
 ## Why NetWatch
 
 - 🔓 **Read encrypted traffic you control** — point a browser or app's `SSLKEYLOGFILE` at NetWatch and watch the plaintext of its TLS 1.3 sessions decode live, the same way Wireshark does it. No proxy, no certificates, nothing in the middle.
+- 🛰️ **Learn what every program talks to, then get told when it changes** — NetWatch watches which destinations each process reaches (hostname from the ClientHello, autonomous system, port), and one keypress promotes that observed baseline into an egress policy. From then on it warns when a program starts talking somewhere new. That is the sentence a firewall ruleset cannot express: *`curl` used to reach only `api.github.com`, and today it reached something else.* Observe-only — it never blocks.
 - 🧬 **Fingerprint the software behind a connection** — JA4 turns each TLS/QUIC handshake into a stable fingerprint, so you can recognize a specific client — or a specific piece of malware — *even though the traffic is encrypted*, the way you'd recognize a browser by its user-agent. Pivot on a fingerprint to find every other flow from the same software.
 - 🚨 **Catch malware calling home** — built-in detection for C2 beaconing (regular, low-jitter check-ins), port scans, and DNS tunneling runs in the background with zero setup. A critical alert auto-freezes the recorder so the evidence is already saved when you look.
 - ⚙️ **Name the process behind every connection** — maps each socket to the program that opened it from `ss`/`lsof`, with an optional kernel-level eBPF kprobe (Linux, the `ebpf` feature) that also catches short-lived flows polling can miss. Works everywhere; the kprobe is an enhancement, not a requirement.
@@ -123,6 +124,42 @@ SSLKEYLOGFILE=/tmp/sslkeylog.txt curl https://example.com  # 2. any client that 
 
 The decrypted application data renders inline. A keylog miss never breaks capture — that record just stays opaque. (`SSLKEYLOGFILE` is the same mechanism Wireshark uses; it only works for traffic *you* control, never third-party or malware traffic.)
 
+### See it catch egress drift in 60 seconds
+
+<p align="center">
+  <img src="demo-egress.gif" alt="NetWatch learning what curl talks to, promoting that baseline to an egress policy, and then flagging a new destination as drift" width="820">
+</p>
+
+<p align="center">
+  <em>Observe → promote → warn. The baseline becomes a policy with one keypress; the next new destination arrives as <strong>drift</strong>.</em>
+</p>
+
+The other thing worth understanding immediately — NetWatch learning what a program talks to, then noticing when that changes:
+
+```bash
+sudo netwatch                  # 1. launch and open the Egress tab (0). Leave it a minute
+                               #    while it learns; each process grows a list of destinations
+                               #    with hostnames, autonomous systems and ports
+                               # 2. put the cursor on a process and press Enter — its observed
+                               #    baseline becomes a rule in egress-policy.toml
+curl https://example.org       # 3. same program, somewhere it has never been
+```
+
+The new destination lands with a `✗ drift` verdict and an alert. Nothing was blocked — the point is that you were *told*.
+
+The verdicts are deliberately not a binary:
+
+| | |
+|---|---|
+| `✓ sni` / `✓ ip` | Matched a declared hostname or address — precise |
+| `~ asn` | Matched only by autonomous system — that admits *everything that AS operates*, which for a hyperscaler is effectively unbounded |
+| `? ech` | Encrypted ClientHello: the name is hidden by design, so this is "cannot judge", not "bad" |
+| `✗ drift` | Outside the allowlist |
+| `— no rule` | This program was never declared — nothing was checked |
+| `✗ undeclared` | No rule, under `strict = true` — the policy claims to be complete, so the *absence* is the finding |
+
+Rules accept exact hostnames, `*.wildcards`, autonomous systems, CIDR blocks (`10.0.0.0/8`), and ports. `strict = true` is what turns the linter from "tell me when my declared software misbehaves" into "tell me when something I never declared starts talking" — which is the shape an actual compromise has.
+
 ## What you get
 
 Ten tabs, switched with `1`–`9` and `0`:
@@ -138,7 +175,7 @@ Ten tabs, switched with `1`–`9` and `0`:
 | 7 | **Timeline** | Connection timeline color-coded by TCP state; security alerts land here. |
 | 8 | **Processes** | Per-process bandwidth ranking with live RX/TX and connection counts. |
 | 9 | **Insights** | *(opt-in)* feeds a snapshot to a local/cloud LLM for plain-language analysis. |
-| 0 | **Egress** | Learns what each process talks to (SNI/ASN/port); promote the baseline to a policy and get warned on drift. |
+| 0 | **Egress** | Learns what each process talks to (hostname/AS/port), promotes that baseline to a policy with one keypress, then warns on drift. Observe-only, never blocks. |
 
 The Packets tab is where the forensics live — deep protocol decoding, live TLS 1.3 decryption, JA4 threat-hunting, Wireshark-style display filters, and incident capture. **[See the full feature reference →](docs/REFERENCE.md)**
 
@@ -170,6 +207,7 @@ Press `L` from either view to switch. Both share the same collectors, so escalat
 | **[TLS 1.3 decryption](docs/REFERENCE.md#tls-13-decryption)** | How `SSLKEYLOGFILE` decryption works, supported cipher suites, and what it can and can't read. |
 | **[Threat hunting with JA4](docs/REFERENCE.md#threat-hunting-with-ja4)** | Fingerprinting clients and pivoting across flows. |
 | **[Security &amp; the Landlock sandbox](docs/REFERENCE.md#security--forensics)** | The threat model, capability dropping, and the filesystem allow-list. |
+| **[Egress policy linting](docs/egress-linter-plan.md)** | The observe → promote → warn model, the rule language, `strict` mode, and the NDJSON export schema. |
 | **[Flight Recorder](docs/REFERENCE.md#flight-recorder)** | Arming, freezing, and the contents of an incident bundle. |
 | **[AI Insights](INSIGHTS.md)** | Optional local/cloud LLM analysis (off by default). |
 
