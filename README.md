@@ -13,12 +13,12 @@
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
   <p align="center">
-    <a title="Tool of The Week on Terminal Trove" href="https://terminaltrove.com/netwatch/"><img src="terminal_trove_totw_badge.svg" alt="Terminal Trove Tool of The Week" height="54" /></a>
+    <a title="Tool of The Week on Terminal Trove" href="https://terminaltrove.com/netwatch/"><img src="docs/media/terminal_trove_totw_badge.svg" alt="Terminal Trove Tool of The Week" height="54" /></a>
   </p>
 </p>
 
 <p align="center">
-  <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
+  <img src="docs/media/demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
 </p>
 
 <p align="center">
@@ -40,7 +40,7 @@ It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen
 And the part no other terminal tool does at all: NetWatch learns what each program on the machine talks to, turns that observed baseline into a policy with one keypress, and tells you the moment a program starts talking somewhere new.
 
 <p align="center">
-  <img src="demo-egress.gif" alt="NetWatch learning what curl talks to, promoting that baseline to an egress policy, and then flagging a new destination as drift" width="820">
+  <img src="docs/media/demo-egress.gif" alt="NetWatch learning what curl talks to, promoting that baseline to an egress policy, and then flagging a new destination as drift" width="820">
 </p>
 
 <p align="center">
@@ -127,7 +127,7 @@ SSLKEYLOGFILE=/tmp/sslkeylog.txt curl https://example.com  # 2. any client that 
 The decrypted application data renders inline. A keylog miss never breaks capture — that record just stays opaque. (`SSLKEYLOGFILE` is the same mechanism Wireshark uses; it only works for traffic *you* control, never third-party or malware traffic.)
 
 <p align="center">
-  <img src="demo-forensics.gif" alt="NetWatch decrypting a live TLS 1.3 session — the plaintext HTTP exchange decoded in the Packets tab" width="800">
+  <img src="docs/media/demo-forensics.gif" alt="NetWatch decrypting a live TLS 1.3 session — the plaintext HTTP exchange decoded in the Packets tab" width="800">
 </p>
 
 <p align="center">
@@ -190,7 +190,7 @@ netwatch --lite     # one screen, fits 80×24
 ```
 
 <p align="center">
-  <img src="demo-lite.gif" alt="NetWatch Lite: one 80×24 screen showing live throughput charts, gateway/DNS/internet reachability, and top talkers by process and host — expanding a connection in place and filtering it live" width="820">
+  <img src="docs/media/demo-lite.gif" alt="NetWatch Lite: one 80×24 screen showing live throughput charts, gateway/DNS/internet reachability, and top talkers by process and host — expanding a connection in place and filtering it live" width="820">
 </p>
 
 <p align="center">
@@ -211,7 +211,7 @@ Press `L` from either view to switch. Both share the same collectors, so escalat
 | **[Security &amp; the Landlock sandbox](docs/REFERENCE.md#security--forensics)** | The threat model, capability dropping, and the filesystem allow-list. |
 | **[Egress policy linting](docs/egress-linter-plan.md)** | The observe → promote → warn model, the rule language, `strict` mode, and the NDJSON export schema. |
 | **[Flight Recorder](docs/REFERENCE.md#flight-recorder)** | Arming, freezing, and the contents of an incident bundle. |
-| **[AI Insights](INSIGHTS.md)** | Optional local/cloud LLM analysis (off by default). |
+| **[AI Insights](docs/INSIGHTS.md)** | Optional local/cloud LLM analysis (off by default). |
 
 ## How it works
 
@@ -228,7 +228,7 @@ Raw bytes → Ethernet → IPv4/IPv6/ARP → TCP/UDP/ICMP → L7 decoders
 | Packets | libpcap (BPF) | libpcap |
 | Process attribution | PKTAP | `lsof`/`ss` polling, with optional eBPF kprobe overlay |
 
-Everything degrades gracefully: features that need elevated privileges show a clear message and fall back, never crash. Full architecture notes live in [WIKI.md](WIKI.md).
+Everything degrades gracefully: features that need elevated privileges show a clear message and fall back, never crash. Full architecture notes live in [WIKI.md](docs/WIKI.md).
 
 ## Related
 
@@ -238,7 +238,7 @@ Everything degrades gracefully: features that need elevated privileges show a cl
 
 ## Contributing
 
-Questions, ideas, and bug reports are welcome in [GitHub Discussions](https://github.com/matthart1983/netwatch/discussions) and [Issues](https://github.com/matthart1983/netwatch/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for coding conventions and [WIKI.md](WIKI.md) for the architecture guide.
+Questions, ideas, and bug reports are welcome in [GitHub Discussions](https://github.com/matthart1983/netwatch/discussions) and [Issues](https://github.com/matthart1983/netwatch/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for coding conventions and [WIKI.md](docs/WIKI.md) for the architecture guide.
 
 ## License
 

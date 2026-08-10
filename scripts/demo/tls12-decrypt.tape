@@ -2,7 +2,7 @@
 # Render from the worktree root:  vhs scripts/demo/tls12-decrypt.tape
 # Requires: pcap access (access_bpf or sudo), OpenSSL-backed python3.
 
-Output demo-tls12-decrypt.gif
+Output docs/media/demo-tls12-decrypt.gif
 
 Set Shell zsh
 Set FontSize 12

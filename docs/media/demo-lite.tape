@@ -14,10 +14,10 @@
 #   - Terminal must be at least 80x24 or Lite renders its too-small notice
 #     instead of the layout. Width/Height below are sized for exactly that.
 #
-# Record with:  vhs demo-lite.tape
+# Record with:  vhs docs/media/demo-lite.tape
 # Needs: ./target/release/netwatch, vhs, scripts/demo-lite-traffic.sh.
 
-Output demo-lite.gif
+Output docs/media/demo-lite.gif
 
 Set Shell "bash"
 Set FontSize 16

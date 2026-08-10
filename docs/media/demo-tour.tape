@@ -31,10 +31,10 @@
 #   - Width has to clear ~130 columns or the tab bar and footer clip, which
 #     reads as a broken render rather than an honest one.
 #
-# Record with:  vhs demo-tour.tape
+# Record with:  vhs docs/media/demo-tour.tape
 # Needs: ./target/release/netwatch, vhs, scripts/demo-lite-traffic.sh.
 
-Output demo-tour.gif
+Output docs/media/demo-tour.gif
 
 Set Shell "bash"
 Set FontSize 16

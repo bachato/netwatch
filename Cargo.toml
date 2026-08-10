@@ -12,20 +12,10 @@ keywords = ["network", "tui", "terminal", "packet-capture", "diagnostics"]
 categories = ["command-line-utilities", "network-programming"]
 exclude = [
     ".DS_Store",
-    # Demo capture artifacts — kept in the repo for README/marketing, but
-    # excluded from the published crate (crates.io has a 10 MiB limit).
-    "demo.gif",
-    "demo-forensics.gif",
-    "demo-lite.gif",
-    "demo.tape",
-    "demo-all.gif",
-    "demo-all.tape",
-    "demo-linkedin.gif",
-    "demo-linkedin.tape",
-    "demo-tls12-decrypt.gif",
-    "demo-slides.txt",
-    "netwatch-demo.mov",
-    "*.tape",
+    # Demo recordings and their vhs tapes. Kept in the repo for the README,
+    # excluded from the published crate — crates.io has a 10 MiB limit and
+    # these are most of the repo's bytes.
+    "docs/media/",
     "*.mov",
     "*.cast",
 ]

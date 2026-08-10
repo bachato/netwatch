@@ -38,10 +38,10 @@
 #   t+40  drift traffic starts        — same program, somewhere new
 #   t+55  sort by risk                — the finding floats to the top
 #
-# Record with:  vhs demo-egress.tape
+# Record with:  vhs docs/media/demo-egress.tape
 # Needs: ./target/release/netwatch, vhs, scripts/demo-egress-traffic.sh.
 
-Output demo-egress.gif
+Output docs/media/demo-egress.gif
 
 Set Shell "bash"
 Set FontSize 16

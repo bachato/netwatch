@@ -10,5 +10,8 @@ comparison.md
 demo-linkedin.*
 *.mov
 
-# vhs intermediate output (we keep the screenshots, not the .gif)
-screenshots/.vhs-trash.gif
+# vhs scratch output, wherever it lands
+.vhs-trash.gif
+
+# Agent worktrees and scratch — never part of the repo
+.claude/
