@@ -38,11 +38,11 @@ It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen
 <samp>650+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
 
 <p align="center">
-  <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, live packet capture and decode, network topology with traceroute, and automatic alerting" width="820">
+  <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
 </p>
 
 <p align="center">
-  <em>A quick tour of the live TUI — dashboard, deep packet inspection, network topology with traceroute, and automatic alerting, all in one terminal.</em>
+  <em>A quick tour of the live TUI — the dashboard, the program behind every socket, deep packet inspection, the network map, and what each program talks to.</em>
 </p>
 
 ## Why NetWatch
