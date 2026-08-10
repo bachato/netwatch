@@ -4,6 +4,57 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-08-10
+
+### Added
+- **CIDR blocks in `allow_ip`.** The rule language could only name an exact
+  address. `allow_ip` exists for destinations that carried no name — no
+  ClientHello SNI, no resolved ASN — and those are disproportionately the ones
+  behind cloud ranges that renumber, so declaring them meant enumerating
+  addresses that change underneath the policy. `10.0.0.0/8` and
+  `2001:db8::/32` now work alongside exact addresses. A malformed pattern
+  matches nothing rather than everything: an allowlist that fails open on a
+  typo silently admits what it could not parse.
+- **A tour that includes the Egress tab** (`demo-tour.gif`, re-recorded) and a
+  dedicated **`demo-egress.gif`** showing the whole observe → promote → warn
+  loop against live traffic. Both now have tapes checked in, so they can be
+  re-recorded rather than only replaced. The tour dropped from 9.2 MB to
+  2.8 MB.
+
+### Fixed
+- **The Egress summary said "all precise" while a drift row was on screen.**
+  The tally counted undeclared, unchecked and ASN-wide destinations but never
+  drift, so a screen whose only finding was drift rendered a green
+  "all precise" directly above a red `✗ drift` row — in both the header and
+  the panel title. A reassuring summary contradicting the alarming detail is
+  the one failure mode a policy linter cannot afford.
+- **`S` did nothing on the Egress tab.** It reverses the sort on every other
+  sortable tab; Egress had no entry in the sort state, so the key was silently
+  inert. It now reverses, and the tab's natural order is documented as
+  descending — every one of its modes is "most interesting first".
+- **Exports resolved `$HOME` directly** instead of `dirs::home_dir()`, which
+  the rest of the codebase uses. `HOME` is normally unset on Windows, where
+  the old fallback quietly wrote incident bundles, PCAPs and egress exports
+  into the working directory.
+- Duplicate `space` entry in the Egress section of the help panel.
+
+### Changed
+- **`s` on the Egress tab opens the sort picker**, like the four other
+  sortable tabs, instead of silently cycling through modes. One key meaning
+  two different things was a trap for anyone with muscle memory from the rest
+  of the app. The picker's columns are declared in sort-mode order with a test
+  asserting the two cannot drift — a mismatch would sort by the wrong mode
+  with no error and no panic.
+- **The egress policy model moved to its own module** (`collectors/egress/
+  policy.rs`). It has no dependency on the profiler and is the one part of
+  netwatch that is a security control rather than an observation: a bug there
+  does not produce a wrong number, it silently admits traffic that should have
+  been reported. 520 lines that can be reviewed without the other 3,200.
+  Re-exported, so no caller changed.
+- Property tests for the SNI matcher — reflexivity, case, wildcard depth, and
+  the neighbours a wildcard must never admit — plus mask monotonicity for the
+  new CIDR matcher. Both were scoped in the egress plan and had not landed.
+
 ## [0.28.1] - 2026-07-29
 
 ### Added
