@@ -21,7 +21,6 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::prelude::*;
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
 use std::sync::Arc;
 
 const RTT_SPARKLINE_SAMPLES: usize = 20;
@@ -322,12 +321,25 @@ pub enum Tab {
 
 use crate::sort::{SortColumn, TabSortState};
 
+/// Where exports land: the user's home directory, falling back to the working
+/// directory when there isn't one.
+///
+/// `dirs::home_dir()` rather than `$HOME` because `HOME` is normally unset on
+/// Windows, where the old fallback quietly wrote exports into whatever the
+/// working directory happened to be. The rest of the codebase already resolves
+/// paths through `dirs` (see `config.rs` and `egress::default_policy_path`);
+/// this brings the three export sites in line.
+fn export_dir() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 pub fn sort_columns_for_tab(tab: Tab) -> &'static [SortColumn] {
     match tab {
         Tab::Dashboard => crate::ui::dashboard::COLUMNS,
         Tab::Connections => crate::ui::connections::COLUMNS,
         Tab::Interfaces => crate::ui::interfaces::COLUMNS,
         Tab::Processes => crate::ui::processes::COLUMNS,
+        Tab::Egress => crate::ui::egress::COLUMNS,
         _ => &[],
     }
 }
@@ -338,6 +350,7 @@ pub fn default_sort_states() -> HashMap<Tab, TabSortState> {
     m.insert(Tab::Connections, crate::ui::connections::DEFAULT_SORT);
     m.insert(Tab::Interfaces, crate::ui::interfaces::DEFAULT_SORT);
     m.insert(Tab::Processes, crate::ui::processes::DEFAULT_SORT);
+    m.insert(Tab::Egress, crate::ui::egress::DEFAULT_SORT);
     m
 }
 
@@ -1029,8 +1042,7 @@ impl App {
             self.freeze_incident_recorder("manual export");
         }
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        match self.incident_recorder.export_bundle(Path::new(&home)) {
+        match self.incident_recorder.export_bundle(&export_dir()) {
             Ok(path) => {
                 self.ui.export_status =
                     Some(format!("Incident bundle saved to {}", path.display()));
@@ -2261,6 +2273,16 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                             column: col_idx,
                             ascending: true,
                         });
+                    // Egress renders from its own mode enum rather than a
+                    // column index, so the pick has to land there too.
+                    // `ui::egress::COLUMNS` is declared in `EgressSort::ALL`
+                    // order precisely so this is an index lookup.
+                    if tab == Tab::Egress {
+                        if let Some(mode) = crate::state::EgressSort::ALL.get(col_idx) {
+                            app.ui.egress_sort = *mode;
+                            app.ui.scroll.egress_scroll = 0;
+                        }
+                    }
                 }
                 ui::sort_picker::PickerAction::ToggleDirection => {
                     let tab = app.ui.current_tab;
@@ -2899,8 +2921,10 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 &packets
             };
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let path = format!("{home}/netwatch_capture_{ts}.pcap");
+            let path = export_dir()
+                .join(format!("netwatch_capture_{ts}.pcap"))
+                .to_string_lossy()
+                .into_owned();
             match export_pcap(to_export, &path) {
                 Ok(n) => {
                     app.ui.export_status = Some(format!("Saved {n} packets to {path}"));
@@ -2964,8 +2988,7 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         }
         KeyCode::Char('e') if app.ui.current_tab == Tab::Egress => {
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let path = std::path::PathBuf::from(format!("{home}/netwatch_egress_{ts}.ndjson"));
+            let path = export_dir().join(format!("netwatch_egress_{ts}.ndjson"));
             match app.egress_profiler.export_ndjson(&path) {
                 Ok(n) => {
                     app.ui.export_status =
@@ -2982,9 +3005,15 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         {
             let conns = app.connection_collector.connections();
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let json_path = format!("{home}/netwatch_connections_{ts}.json");
-            let csv_path = format!("{home}/netwatch_connections_{ts}.csv");
+            let dir = export_dir();
+            let json_path = dir
+                .join(format!("netwatch_connections_{ts}.json"))
+                .to_string_lossy()
+                .into_owned();
+            let csv_path = dir
+                .join(format!("netwatch_connections_{ts}.csv"))
+                .to_string_lossy()
+                .into_owned();
             match crate::collectors::connections::export_json(&conns, &json_path) {
                 Ok(n) => {
                     let _ = crate::collectors::connections::export_csv(&conns, &csv_path);
@@ -2995,10 +3024,6 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 }
             }
             app.ui.export_status_tick = 0;
-        }
-        KeyCode::Char('s') if app.ui.current_tab == Tab::Egress => {
-            app.ui.egress_sort = app.ui.egress_sort.next();
-            app.ui.scroll.egress_scroll = 0;
         }
         KeyCode::Char('d') if app.ui.current_tab == Tab::Egress => {
             app.ui.egress_detail = !app.ui.egress_detail;
@@ -3031,9 +3056,9 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.ui.connection_collapsed.toggle_all();
             app.ui.scroll.connection_scroll = 0;
         }
-        // Must stay ahead of the unguarded `s`/`S` sort arms below — match
-        // arms are ordered, and a guarded Egress arm placed after an
-        // unguarded one silently never fires.
+        // Must stay ahead of the unguarded sort arms below — match arms are
+        // ordered, and a guarded Egress arm placed after an unguarded one
+        // silently never fires.
         KeyCode::Char('x') | KeyCode::Delete if app.ui.current_tab == Tab::Egress => {
             app.request_egress_removal();
         }
@@ -3556,7 +3581,11 @@ mod tests {
     fn default_sort_states_are_ascending() {
         for (tab, state) in &default_sort_states() {
             match tab {
-                Tab::Processes | Tab::Interfaces => assert!(
+                // Egress joins these two: every one of its sort modes is
+                // "most interesting first" — biggest volume, most recent,
+                // highest risk — so its natural order is descending and `S`
+                // flips it, exactly as on Processes and Interfaces.
+                Tab::Processes | Tab::Interfaces | Tab::Egress => assert!(
                     !state.ascending,
                     "{:?} default should be descending (top traffic first)",
                     tab

@@ -51,6 +51,26 @@ pub enum EgressRow<'a> {
     },
 }
 
+/// The sort modes offered by the shared sort picker, in `EgressSort::ALL`
+/// order so a picked index maps straight back to a mode.
+///
+/// Egress sorts by mode rather than by column — "risk" and "active" are not
+/// columns you could click — but it goes through the same picker as every
+/// other tab, because `s` meaning "open the sort picker" on four tabs and
+/// "silently cycle" on this one was a trap for anyone with muscle memory.
+pub const COLUMNS: &[crate::sort::SortColumn] = &[
+    crate::sort::SortColumn { name: "Volume" },
+    crate::sort::SortColumn { name: "Active" },
+    crate::sort::SortColumn { name: "Process" },
+    crate::sort::SortColumn { name: "Last seen" },
+    crate::sort::SortColumn { name: "Risk" },
+];
+
+pub const DEFAULT_SORT: crate::sort::TabSortState = crate::sort::TabSortState {
+    column: 0,
+    ascending: false,
+};
+
 /// Attention ordering over verdicts — lower is more urgent. Drives both the
 /// risk sort and the rollup verdict a collapsed process shows.
 ///
@@ -157,6 +177,17 @@ pub fn visible_rows(app: &App) -> Vec<EgressRow<'_>> {
             };
             rank(a).cmp(&rank(b)).then_with(|| key(b).0.cmp(&key(a).0))
         }),
+    }
+    // Every mode above sorts "most interesting first". `S` reverses that, the
+    // same way it reverses the sortable tabs, so the key is no longer a no-op
+    // here.
+    if app
+        .ui
+        .sort_states
+        .get(&crate::app::Tab::Egress)
+        .is_some_and(|st| st.ascending)
+    {
+        groups.reverse();
     }
 
     let mut rows = Vec::new();
@@ -956,6 +987,28 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The sort picker hands back an index into `COLUMNS`; `app.rs` turns that
+    /// index into an `EgressSort` by indexing `EgressSort::ALL`. If the two
+    /// lists ever differ in length or order, picking "Risk" silently sorts by
+    /// something else — a bug with no error and no panic.
+    #[test]
+    fn sort_columns_line_up_with_sort_modes() {
+        assert_eq!(
+            COLUMNS.len(),
+            EgressSort::ALL.len(),
+            "COLUMNS and EgressSort::ALL must stay the same length"
+        );
+        for (col, mode) in COLUMNS.iter().zip(EgressSort::ALL) {
+            assert_eq!(
+                col.name.to_ascii_lowercase(),
+                mode.label().to_ascii_lowercase(),
+                "column {:?} does not name the mode it selects ({:?})",
+                col.name,
+                mode.label()
+            );
+        }
+    }
     use super::*;
 
     /// `count` is ticks-since-first-seen, i.e. seconds. Rendering it raw was

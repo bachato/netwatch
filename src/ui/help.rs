@@ -309,8 +309,8 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     ));
     lines.push(key_line(
         theme,
-        "s",
-        "Cycle sort (volume / active / process / last seen / risk)",
+        "s / S",
+        "Sort picker (volume / active / process / last seen / risk) · S reverses",
     ));
     lines.push(key_line(theme, "/", "Filter by process or destination"));
     lines.push(key_line(theme, "d", "Toggle destination detail pane"));
@@ -324,11 +324,6 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
         theme,
         "x / Del",
         "Remove selected process from policy (confirm with y)",
-    ));
-    lines.push(key_line(
-        theme,
-        "space",
-        "Fold/expand the process under the cursor",
     ));
     lines.push(key_line(theme, "z", "Fold/expand every process"));
     lines.push(key_line(theme, "e", "Export baseline to NDJSON"));

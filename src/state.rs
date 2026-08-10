@@ -118,10 +118,6 @@ impl EgressSort {
             EgressSort::Risk => "risk",
         }
     }
-    pub fn next(self) -> EgressSort {
-        let i = EgressSort::ALL.iter().position(|x| *x == self).unwrap_or(0);
-        EgressSort::ALL[(i + 1) % EgressSort::ALL.len()]
-    }
 }
 
 pub struct AppUiState {
