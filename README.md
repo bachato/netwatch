@@ -238,13 +238,14 @@ Everything degrades gracefully: features that need elevated privileges show a cl
 
 ## Thanks
 
-**Packagers.** NetWatch is in [homebrew-core](https://formulae.brew.sh/formula/netwatch), [nixpkgs](https://search.nixos.org/packages?query=netwatch) and the [AUR](https://aur.archlinux.org/packages/netwatch-tui) — and I packaged none of it. Every one of those was done by someone who found the tool useful, did the work unasked, and has kept it current since, usually within a day of a release landing.
+**Packagers.** NetWatch is in [homebrew-core](https://formulae.brew.sh/formula/netwatch), [nixpkgs](https://search.nixos.org/packages?query=netwatch), the [AUR](https://aur.archlinux.org/packages/netwatch-tui) and the [Scoop](https://scoop.sh) main bucket — and I packaged none of it. Every one of those was done by someone who found the tool useful, did the work unasked, and has kept it current since. The Scoop entry has usually tracked a release within hours of the tag.
 
 | | |
 |---|---|
 | **Dominiquini** | [`netwatch-tui`](https://aur.archlinux.org/packages/netwatch-tui) on the AUR, since March 2026 |
 | **kemelzaidan** | [`netwatch-tui-bin`](https://aur.archlinux.org/packages/netwatch-tui-bin) on the AUR |
 | **tomasrivera** | [`netwatch` in nixpkgs](https://github.com/NixOS/nixpkgs/blob/nixos-unstable/pkgs/by-name/ne/netwatch/package.nix) |
+| **[scillidan](https://github.com/scillidan)** | [`netwatch` in the Scoop main bucket](https://github.com/ScoopInstaller/Main/blob/master/bucket/netwatch.json), since v0.15.3 |
 | **Homebrew maintainers** | for taking the formula into core, and the bot that has tracked every release since |
 
 Packaging is thankless work that only gets noticed when it breaks. If you install NetWatch through one of these, you have them to thank for it, not me.
