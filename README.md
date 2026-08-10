@@ -236,6 +236,23 @@ Everything degrades gracefully: features that need elevated privileges show a cl
 
 **[NetWatch Cloud](https://www.netwatchlabs.com)** — hosted fleet monitoring for the servers you run NetWatch against. A tiny Rust agent on each Linux host, a real-time dashboard, and email + Slack alerts on latency, packet loss, or hosts going offline. **Free while we grow.** The [agent](https://github.com/matthart1983/netwatch-agent), [SDK](https://github.com/matthart1983/netwatch-sdk), and [dashboard](https://github.com/matthart1983/netwatch-dashboard) are MIT; the hosted backend is proprietary.
 
+## Thanks
+
+**Packagers.** NetWatch is in [homebrew-core](https://formulae.brew.sh/formula/netwatch), [nixpkgs](https://search.nixos.org/packages?query=netwatch) and the [AUR](https://aur.archlinux.org/packages/netwatch-tui) — and I packaged none of it. Every one of those was done by someone who found the tool useful, did the work unasked, and has kept it current since, usually within a day of a release landing.
+
+| | |
+|---|---|
+| **Dominiquini** | [`netwatch-tui`](https://aur.archlinux.org/packages/netwatch-tui) on the AUR, since March 2026 |
+| **kemelzaidan** | [`netwatch-tui-bin`](https://aur.archlinux.org/packages/netwatch-tui-bin) on the AUR |
+| **tomasrivera** | [`netwatch` in nixpkgs](https://github.com/NixOS/nixpkgs/blob/nixos-unstable/pkgs/by-name/ne/netwatch/package.nix) |
+| **Homebrew maintainers** | for taking the formula into core, and the bot that has tracked every release since |
+
+Packaging is thankless work that only gets noticed when it breaks. If you install NetWatch through one of these, you have them to thank for it, not me.
+
+**Contributors.** [@lamchau](https://github.com/lamchau), [@fdncred](https://github.com/fdncred) and [@PeteE](https://github.com/PeteE) have sent patches. Thank you — a pull request from a stranger is the best thing that happens to a project like this.
+
+And to everyone who has opened an issue with a real repro, argued with a design decision, or told me the output was wrong on their terminal: that is the feedback loop this is built on.
+
 ## Contributing
 
 Questions, ideas, and bug reports are welcome in [GitHub Discussions](https://github.com/matthart1983/netwatch/discussions) and [Issues](https://github.com/matthart1983/netwatch/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for coding conventions and [WIKI.md](docs/WIKI.md) for the architecture guide.
