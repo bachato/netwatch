@@ -18,11 +18,11 @@
 </p>
 
 <p align="center">
-  <img src="demo-forensics.gif" alt="NetWatch decrypting a live TLS 1.3 session — the plaintext HTTP exchange decoded in the Packets tab" width="800">
+  <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
 </p>
 
 <p align="center">
-  <em>Reading the plaintext out of a live <strong>TLS 1.3</strong> session — decrypted right in the terminal. No proxy, no man-in-the-middle.</em>
+  <em>A quick tour of the live TUI — the dashboard, the program behind every socket, deep packet inspection, the network map, and what each program talks to.</em>
 </p>
 
 ---
@@ -37,12 +37,14 @@ It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen
 
 <samp>650+ tests · Landlock-sandboxed (Linux) · safely parses hostile traffic</samp>
 
+And the part no other terminal tool does at all: NetWatch learns what each program on the machine talks to, turns that observed baseline into a policy with one keypress, and tells you the moment a program starts talking somewhere new.
+
 <p align="center">
-  <img src="demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
+  <img src="demo-egress.gif" alt="NetWatch learning what curl talks to, promoting that baseline to an egress policy, and then flagging a new destination as drift" width="820">
 </p>
 
 <p align="center">
-  <em>A quick tour of the live TUI — the dashboard, the program behind every socket, deep packet inspection, the network map, and what each program talks to.</em>
+  <em>Observe → promote → warn. The baseline becomes a policy with one keypress; the next new destination arrives as <strong>drift</strong>.</em>
 </p>
 
 ## Why NetWatch
@@ -124,17 +126,17 @@ SSLKEYLOGFILE=/tmp/sslkeylog.txt curl https://example.com  # 2. any client that 
 
 The decrypted application data renders inline. A keylog miss never breaks capture — that record just stays opaque. (`SSLKEYLOGFILE` is the same mechanism Wireshark uses; it only works for traffic *you* control, never third-party or malware traffic.)
 
+<p align="center">
+  <img src="demo-forensics.gif" alt="NetWatch decrypting a live TLS 1.3 session — the plaintext HTTP exchange decoded in the Packets tab" width="800">
+</p>
+
+<p align="center">
+  <em>Reading the plaintext out of a live <strong>TLS 1.3</strong> session — decrypted right in the terminal. No proxy, no man-in-the-middle.</em>
+</p>
+
 ### See it catch egress drift in 60 seconds
 
-<p align="center">
-  <img src="demo-egress.gif" alt="NetWatch learning what curl talks to, promoting that baseline to an egress policy, and then flagging a new destination as drift" width="820">
-</p>
-
-<p align="center">
-  <em>Observe → promote → warn. The baseline becomes a policy with one keypress; the next new destination arrives as <strong>drift</strong>.</em>
-</p>
-
-The other thing worth understanding immediately — NetWatch learning what a program talks to, then noticing when that changes:
+The loop from the demo above, in three commands:
 
 ```bash
 sudo netwatch                  # 1. launch and open the Egress tab (0). Leave it a minute
