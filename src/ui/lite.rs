@@ -415,7 +415,11 @@ fn host_of(addr: &str) -> String {
     }
 }
 
-fn sni_of(c: &crate::collectors::connections::Connection) -> Option<String> {
+/// The TLS/QUIC ClientHello's SNI, when the handshake was captured.
+///
+/// `pub(crate)` so Dense resolves hostnames the same way — a table of bare
+/// IPs where the other views show names is the same data rendered worse.
+pub(crate) fn sni_of(c: &crate::collectors::connections::Connection) -> Option<String> {
     use crate::dpi::AppProtocol::{Quic, Tls};
     match &c.app_protocol {
         Some(Tls { sni: Some(s), .. }) | Some(Quic { sni: Some(s), .. }) => Some(s.clone()),

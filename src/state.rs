@@ -217,7 +217,8 @@ impl AppUiState {
     pub fn from_config(cfg: &NetwatchConfig) -> Self {
         Self {
             current_tab: cfg.tab(),
-            view_mode: ViewMode::default(),
+            // The saved default; `--view` overrides it in `app::run`.
+            view_mode: ViewMode::by_name(&cfg.view),
             lite: LiteState::default(),
             scroll: UiScrollState::default(),
             sort_states: default_sort_states(),

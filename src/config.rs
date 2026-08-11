@@ -52,6 +52,12 @@ pub struct NetwatchConfig {
     /// Color theme (dark, light, ocean, solarized, dracula, nord)
     pub theme: String,
 
+    /// Which view starts: `full` (the tabbed TUI), `lite` (one 80×24 screen),
+    /// or `dense` (the four-box 130×44 screen). `full` stays the default —
+    /// the other two are opt-in, and `--view` overrides this for one run.
+    #[serde(default = "default_view")]
+    pub view: String,
+
     /// Hero-panel graph style (bars, btop). Applies only to the aggregated
     /// RX/TX charts on the dashboard and interfaces tabs; in-row sparklines
     /// always use the default `bars` style regardless of this setting.
@@ -109,6 +115,10 @@ fn default_groups_collapsed() -> bool {
     true
 }
 
+fn default_view() -> String {
+    "full".into()
+}
+
 fn default_sandbox() -> String {
     "on".into()
 }
@@ -145,6 +155,7 @@ impl Default for NetwatchConfig {
             insights_model: "llama3.2".into(),
             insights_endpoint: "local".into(),
             theme: "dark".into(),
+            view: default_view(),
             graph_style: "bars".into(),
             graph_fade: false,
             sandbox: default_sandbox(),
@@ -201,6 +212,11 @@ impl NetwatchConfig {
         }
         if self.graph_style.is_empty() {
             self.graph_style = "bars".into();
+        }
+        // An unknown view name falls back to `full` rather than refusing to
+        // start: a typo in a config file must not cost you the tool.
+        if !crate::app::VIEW_MODE_NAMES.contains(&self.view.as_str()) {
+            self.view = default_view();
         }
         if self.default_tab.is_empty() {
             self.default_tab = "dashboard".into();
@@ -312,6 +328,7 @@ show_geo = false
             insights_model: "llama3:8b".into(),
             insights_endpoint: "local".into(),
             theme: "dark".into(),
+            view: "dense".into(),
             graph_style: "bars".into(),
             graph_fade: false,
             sandbox: "strict".into(),

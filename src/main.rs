@@ -33,12 +33,14 @@ async fn main() -> Result<()> {
              --remote <url>            Stream metrics to a NetWatch Core instance\n    \
              --api-key <key>           API key for remote streaming\n    \
              --lite                    Start in Lite view: one screen, fits 80×24\n    \
+             --view <full|lite|dense>  Start in a specific view (dense: four boxes, 130×44)\n    \
              --no-sandbox              Disable the post-startup security sandbox\n    \
              --sandbox-strict          Refuse to start if the sandbox can't be enforced\n    \
              --metrics-addr <addr>     (daemon) Serve Prometheus /metrics + /healthz on addr\n    \
              --metrics                 (daemon) Serve metrics on the default 127.0.0.1:9464\n    \
              -h, --help                Print help\n    -V, --version             Print version\n\n\
              KEYS (in TUI):\n    1-7   Switch tabs    /     Filter    q   Quit\n    \
+             V     Cycle view (full → lite → dense)\n    \
              L     Toggle Lite view\n    \
              Shift+R/F/E   Flight Recorder: arm / freeze / export",
             env!("CARGO_PKG_VERSION")
@@ -72,7 +74,19 @@ async fn main() -> Result<()> {
     // Lite is opt-in at every terminal size — we never auto-select it, since
     // that would make the tabs unreachable on a small terminal with no
     // obvious way back.
-    let lite = args.iter().any(|a| a == "--lite");
+    // Views are opt-in at every terminal size — we never auto-select one, since
+    // that would make the tabs unreachable on a small terminal with no obvious
+    // way back. `--view` is the general form; `--lite` predates it and stays.
+    let view = args
+        .iter()
+        .position(|a| a == "--view")
+        .and_then(|i| args.get(i + 1))
+        .map(|name| netwatch::app::ViewMode::by_name(name))
+        .or_else(|| {
+            args.iter()
+                .any(|a| a == "--lite")
+                .then_some(netwatch::app::ViewMode::Lite)
+        });
 
     let sandbox_mode = if args.iter().any(|a| a == "--no-sandbox") {
         netwatch::sandbox::Mode::Disabled
@@ -149,7 +163,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app::run(&mut terminal, remote_publisher.as_ref(), sandbox_mode, lite).await;
+    let result = app::run(&mut terminal, remote_publisher.as_ref(), sandbox_mode, view).await;
 
     disable_raw_mode()?;
     execute!(

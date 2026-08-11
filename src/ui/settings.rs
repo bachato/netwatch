@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-pub const SETTINGS_COUNT: usize = 19;
+pub const SETTINGS_COUNT: usize = 20;
 
 pub const TAB_NAMES: &[&str] = &[
     "dashboard",
@@ -22,24 +22,25 @@ pub const TAB_NAMES: &[&str] = &[
 /// Use these instead of magic integers when navigating or jumping to a setting.
 pub mod cursor {
     pub const THEME: usize = 0;
-    pub const DEFAULT_TAB: usize = 1;
-    pub const REFRESH_RATE: usize = 2;
-    pub const CAPTURE_INTERFACE: usize = 3;
-    pub const SHOW_GEO: usize = 4;
-    pub const TIMELINE_WINDOW: usize = 5;
-    pub const PACKET_FOLLOW: usize = 6;
-    pub const BPF_FILTER: usize = 7;
-    pub const GEOIP_DB: usize = 8;
-    pub const GEOIP_ASN_DB: usize = 9;
-    pub const BANDWIDTH_THRESHOLD: usize = 10;
-    pub const PORT_SCAN_THRESHOLD: usize = 11;
-    pub const AI_INSIGHTS: usize = 12;
-    pub const AI_MODEL: usize = 13;
-    pub const AI_ENDPOINT: usize = 14;
-    pub const GRAPH_STYLE: usize = 15;
-    pub const GRAPH_FADE: usize = 16;
-    pub const SANDBOX: usize = 17;
-    pub const GROUPS_COLLAPSED: usize = 18;
+    pub const VIEW: usize = 1;
+    pub const DEFAULT_TAB: usize = 2;
+    pub const REFRESH_RATE: usize = 3;
+    pub const CAPTURE_INTERFACE: usize = 4;
+    pub const SHOW_GEO: usize = 5;
+    pub const TIMELINE_WINDOW: usize = 6;
+    pub const PACKET_FOLLOW: usize = 7;
+    pub const BPF_FILTER: usize = 8;
+    pub const GEOIP_DB: usize = 9;
+    pub const GEOIP_ASN_DB: usize = 10;
+    pub const BANDWIDTH_THRESHOLD: usize = 11;
+    pub const PORT_SCAN_THRESHOLD: usize = 12;
+    pub const AI_INSIGHTS: usize = 13;
+    pub const AI_MODEL: usize = 14;
+    pub const AI_ENDPOINT: usize = 15;
+    pub const GRAPH_STYLE: usize = 16;
+    pub const GRAPH_FADE: usize = 17;
+    pub const SANDBOX: usize = 18;
+    pub const GROUPS_COLLAPSED: usize = 19;
 }
 
 struct SettingRow {
@@ -54,6 +55,7 @@ fn is_cycle_through(cursor: usize) -> bool {
     matches!(
         cursor,
         cursor::THEME
+            | cursor::VIEW
             | cursor::DEFAULT_TAB
             | cursor::GRAPH_STYLE
             | cursor::GRAPH_FADE
@@ -67,6 +69,10 @@ fn build_rows(cfg: &NetwatchConfig) -> Vec<SettingRow> {
         SettingRow {
             label: "Theme",
             value: cfg.theme.clone(),
+        },
+        SettingRow {
+            label: "View",
+            value: cfg.view.clone(),
         },
         SettingRow {
             label: "Default Tab",
@@ -374,9 +380,14 @@ pub fn get_edit_value(cfg: &NetwatchConfig, cursor: usize) -> String {
 }
 
 /// Apply the edited value back to the config. Returns an error message if invalid.
+/// Apply an edited value to the setting at `cursor`.
+///
+/// The arms match on `cursor::*` constants, never on bare integers: this
+/// function is keyed by row position, so a literal here silently re-points
+/// every editor below it the moment a row is inserted.
 pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Result<(), String> {
     match cursor {
-        0 => {
+        cursor::THEME => {
             let valid = crate::theme::THEME_NAMES;
             let v = value.to_lowercase();
             if valid.contains(&v.as_str()) {
@@ -386,7 +397,19 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
                 Err(format!("Invalid theme. Use: {}", valid.join(", ")))
             }
         }
-        1 => {
+        cursor::VIEW => {
+            let v = value.to_lowercase();
+            if crate::app::VIEW_MODE_NAMES.contains(&v.as_str()) {
+                cfg.view = v;
+                Ok(())
+            } else {
+                Err(format!(
+                    "Invalid view. Use: {}",
+                    crate::app::VIEW_MODE_NAMES.join(", ")
+                ))
+            }
+        }
+        cursor::DEFAULT_TAB => {
             let v = value.to_lowercase();
             if TAB_NAMES.contains(&v.as_str()) {
                 cfg.default_tab = v;
@@ -395,7 +418,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
                 Err(format!("Invalid tab. Use: {}", TAB_NAMES.join(", ")))
             }
         }
-        2 => {
+        cursor::REFRESH_RATE => {
             let ms: u64 = value.parse().map_err(|_| "Must be a number".to_string())?;
             if !(100..=5000).contains(&ms) {
                 return Err("Must be 100–5000".into());
@@ -403,11 +426,11 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
             cfg.refresh_rate_ms = ms;
             Ok(())
         }
-        3 => {
+        cursor::CAPTURE_INTERFACE => {
             cfg.capture_interface = value.to_string();
             Ok(())
         }
-        4 => {
+        cursor::SHOW_GEO => {
             match value.to_lowercase().as_str() {
                 "on" | "true" | "yes" | "1" => cfg.show_geo = true,
                 "off" | "false" | "no" | "0" => cfg.show_geo = false,
@@ -415,7 +438,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
             }
             Ok(())
         }
-        5 => {
+        cursor::TIMELINE_WINDOW => {
             let valid = ["1m", "5m", "15m", "30m", "1h"];
             if valid.contains(&value) {
                 cfg.timeline_window = value.to_string();
@@ -424,7 +447,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
                 Err(format!("Use: {}", valid.join(", ")))
             }
         }
-        6 => {
+        cursor::PACKET_FOLLOW => {
             match value.to_lowercase().as_str() {
                 "on" | "true" | "yes" | "1" => cfg.packet_follow = true,
                 "off" | "false" | "no" | "0" => cfg.packet_follow = false,
@@ -432,31 +455,31 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
             }
             Ok(())
         }
-        7 => {
+        cursor::BPF_FILTER => {
             cfg.bpf_filter = value.to_string();
             Ok(())
         }
-        8 => {
+        cursor::GEOIP_DB => {
             cfg.geoip_db = value.to_string();
             Ok(())
         }
-        9 => {
+        cursor::GEOIP_ASN_DB => {
             cfg.geoip_asn_db = value.to_string();
             Ok(())
         }
-        10 => {
+        cursor::BANDWIDTH_THRESHOLD => {
             let v: u64 = value
                 .parse()
                 .map_err(|_| "Must be a number (bytes/sec)".to_string())?;
             cfg.alerts.bandwidth_threshold = v;
             Ok(())
         }
-        11 => {
+        cursor::PORT_SCAN_THRESHOLD => {
             let v: usize = value.parse().map_err(|_| "Must be a number".to_string())?;
             cfg.alerts.port_scan_threshold = v;
             Ok(())
         }
-        12 => {
+        cursor::AI_INSIGHTS => {
             match value.to_lowercase().as_str() {
                 "on" | "true" | "yes" | "1" => cfg.insights_enabled = true,
                 "off" | "false" | "no" | "0" => cfg.insights_enabled = false,
@@ -464,18 +487,18 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
             }
             Ok(())
         }
-        13 => {
+        cursor::AI_MODEL => {
             if value.is_empty() {
                 return Err("Model name cannot be empty".into());
             }
             cfg.insights_model = value.to_string();
             Ok(())
         }
-        14 => {
+        cursor::AI_ENDPOINT => {
             cfg.insights_endpoint = value.to_string();
             Ok(())
         }
-        15 => {
+        cursor::GRAPH_STYLE => {
             let valid = crate::graph::GRAPH_STYLE_NAMES;
             let v = value.to_lowercase();
             if valid.contains(&v.as_str()) {
@@ -485,7 +508,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
                 Err(format!("Invalid graph style. Use: {}", valid.join(", ")))
             }
         }
-        16 => {
+        cursor::GRAPH_FADE => {
             match value.to_lowercase().as_str() {
                 "on" | "true" | "yes" | "1" => cfg.graph_fade = true,
                 "off" | "false" | "no" | "0" => cfg.graph_fade = false,
@@ -493,7 +516,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
             }
             Ok(())
         }
-        17 => {
+        cursor::SANDBOX => {
             let v = value.trim().to_ascii_lowercase();
             match v.as_str() {
                 "on" | "strict" | "off" => {
@@ -503,7 +526,7 @@ pub fn apply_edit(cfg: &mut NetwatchConfig, cursor: usize, value: &str) -> Resul
                 _ => Err("Use on / strict / off".into()),
             }
         }
-        18 => {
+        cursor::GROUPS_COLLAPSED => {
             match value.to_lowercase().as_str() {
                 "on" | "true" | "yes" | "1" => cfg.groups_start_collapsed = true,
                 "off" | "false" | "no" | "0" => cfg.groups_start_collapsed = false,
@@ -539,14 +562,14 @@ mod tests {
     #[test]
     fn apply_valid_tab() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 1, "packets").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::DEFAULT_TAB, "packets").is_ok());
         assert_eq!(cfg.default_tab, "packets");
     }
 
     #[test]
     fn apply_invalid_tab() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 1, "nonsense").is_err());
+        assert!(apply_edit(&mut cfg, cursor::DEFAULT_TAB, "nonsense").is_err());
     }
 
     #[test]
@@ -556,7 +579,11 @@ mod tests {
         let mut cfg = NetwatchConfig::default();
         assert!(TAB_NAMES.contains(&cfg.default_tab.as_str()));
         for name in TAB_NAMES {
-            assert!(apply_edit(&mut cfg, 1, name).is_ok(), "rejected {}", name);
+            assert!(
+                apply_edit(&mut cfg, cursor::DEFAULT_TAB, name).is_ok(),
+                "rejected {}",
+                name
+            );
             assert_eq!(cfg.default_tab, *name);
         }
     }
@@ -564,56 +591,56 @@ mod tests {
     #[test]
     fn apply_refresh_rate_bounds() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 2, "500").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::REFRESH_RATE, "500").is_ok());
         assert_eq!(cfg.refresh_rate_ms, 500);
-        assert!(apply_edit(&mut cfg, 2, "50").is_err());
-        assert!(apply_edit(&mut cfg, 2, "10000").is_err());
-        assert!(apply_edit(&mut cfg, 2, "abc").is_err());
+        assert!(apply_edit(&mut cfg, cursor::REFRESH_RATE, "50").is_err());
+        assert!(apply_edit(&mut cfg, cursor::REFRESH_RATE, "10000").is_err());
+        assert!(apply_edit(&mut cfg, cursor::REFRESH_RATE, "abc").is_err());
     }
 
     #[test]
     fn apply_bool_toggle() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 4, "off").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::SHOW_GEO, "off").is_ok());
         assert!(!cfg.show_geo);
-        assert!(apply_edit(&mut cfg, 4, "on").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::SHOW_GEO, "on").is_ok());
         assert!(cfg.show_geo);
-        assert!(apply_edit(&mut cfg, 4, "maybe").is_err());
+        assert!(apply_edit(&mut cfg, cursor::SHOW_GEO, "maybe").is_err());
     }
 
     #[test]
     fn apply_timeline_window() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 5, "1h").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::TIMELINE_WINDOW, "1h").is_ok());
         assert_eq!(cfg.timeline_window, "1h");
-        assert!(apply_edit(&mut cfg, 5, "2h").is_err());
+        assert!(apply_edit(&mut cfg, cursor::TIMELINE_WINDOW, "2h").is_err());
     }
 
     #[test]
     fn apply_bandwidth_threshold() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 10, "50000000").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::BANDWIDTH_THRESHOLD, "50000000").is_ok());
         assert_eq!(cfg.alerts.bandwidth_threshold, 50_000_000);
-        assert!(apply_edit(&mut cfg, 10, "not_a_number").is_err());
+        assert!(apply_edit(&mut cfg, cursor::BANDWIDTH_THRESHOLD, "not_a_number").is_err());
     }
 
     #[test]
     fn apply_string_fields() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 3, "en1").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::CAPTURE_INTERFACE, "en1").is_ok());
         assert_eq!(cfg.capture_interface, "en1");
-        assert!(apply_edit(&mut cfg, 7, "tcp port 80").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::BPF_FILTER, "tcp port 80").is_ok());
         assert_eq!(cfg.bpf_filter, "tcp port 80");
-        assert!(apply_edit(&mut cfg, 10, "50000000").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::BANDWIDTH_THRESHOLD, "50000000").is_ok());
         assert_eq!(cfg.alerts.bandwidth_threshold, 50_000_000);
     }
 
     #[test]
     fn apply_theme() {
         let mut cfg = NetwatchConfig::default();
-        assert!(apply_edit(&mut cfg, 0, "dracula").is_ok());
+        assert!(apply_edit(&mut cfg, cursor::THEME, "dracula").is_ok());
         assert_eq!(cfg.theme, "dracula");
-        assert!(apply_edit(&mut cfg, 0, "invalid").is_err());
+        assert!(apply_edit(&mut cfg, cursor::THEME, "invalid").is_err());
     }
 
     #[test]
@@ -642,6 +669,29 @@ mod tests {
         let mut cfg = NetwatchConfig::default();
         assert!(apply_edit(&mut cfg, cursor::SANDBOX, "loose").is_err());
         assert!(apply_edit(&mut cfg, cursor::SANDBOX, "").is_err());
+    }
+
+    /// `apply_edit` is keyed by row position, so every named cursor must
+    /// still reach its own setting. This is the test that would have caught
+    /// the View row shifting every editor below it by one.
+    #[test]
+    fn each_cursor_edits_its_own_setting() {
+        let mut cfg = NetwatchConfig::default();
+        assert!(apply_edit(&mut cfg, cursor::VIEW, "dense").is_ok());
+        assert_eq!(cfg.view, "dense");
+        assert!(apply_edit(&mut cfg, cursor::VIEW, "nope").is_err());
+
+        assert!(apply_edit(&mut cfg, cursor::THEME, "nord").is_ok());
+        assert_eq!(cfg.theme, "nord");
+        assert!(apply_edit(&mut cfg, cursor::DEFAULT_TAB, "packets").is_ok());
+        assert_eq!(cfg.default_tab, "packets");
+        assert!(apply_edit(&mut cfg, cursor::REFRESH_RATE, "250").is_ok());
+        assert_eq!(cfg.refresh_rate_ms, 250);
+        assert!(apply_edit(&mut cfg, cursor::GRAPH_STYLE, "dots").is_ok());
+        assert_eq!(cfg.graph_style, "dots");
+        assert!(apply_edit(&mut cfg, cursor::SANDBOX, "strict").is_ok());
+        assert_eq!(cfg.sandbox, "strict");
+        assert_eq!(SETTINGS_COUNT, cursor::GROUPS_COLLAPSED + 1);
     }
 
     #[test]

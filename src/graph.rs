@@ -187,12 +187,17 @@ fn render_bars(buf: &mut Buffer, area: Rect, data: &[u64], max: u64, base: Color
 /// Bit position in a braille cell mask for each (sub_col, sub_row).
 /// Braille pattern dots numbered 1–8 map to bits 0–7; the 4th row uses dots
 /// 7 and 8 (bits 6 and 7) which is why it's not a straight `row + col*4`.
-const BRAILLE_BIT: [[u8; 4]; 2] = [
+///
+/// `pub(crate)` because the Dense view's mirrored graph addresses the two
+/// sub-columns independently (two samples per cell) rather than filling both
+/// like [`render_dots`] does. Same table, different packing — duplicating it
+/// is how the two drift apart.
+pub(crate) const BRAILLE_BIT: [[u8; 4]; 2] = [
     [0, 1, 2, 6], // sub_col 0: rows 0..=3 → dots 1, 2, 3, 7
     [3, 4, 5, 7], // sub_col 1: rows 0..=3 → dots 4, 5, 6, 8
 ];
 
-const BRAILLE_BASE: u32 = 0x2800;
+pub(crate) const BRAILLE_BASE: u32 = 0x2800;
 
 fn render_dots(
     buf: &mut Buffer,

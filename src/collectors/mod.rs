@@ -9,6 +9,7 @@ pub mod network_intel;
 pub mod packets;
 pub mod process_bandwidth;
 pub mod quic;
+pub mod tcp_info;
 pub mod traceroute;
 pub mod traffic;
 pub mod whois;

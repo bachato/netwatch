@@ -25,10 +25,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     // Lite gets its own compact key list — dumping the full TUI's ~40
     // bindings into a view built around six keys would undercut the point.
-    let lines = if app.ui.view_mode == crate::app::ViewMode::Lite {
-        build_lite_help_lines(&app.theme)
-    } else {
-        build_help_lines(&app.theme)
+    let lines = match app.ui.view_mode {
+        crate::app::ViewMode::Lite => build_lite_help_lines(&app.theme),
+        crate::app::ViewMode::Dense => build_dense_help_lines(&app.theme),
+        crate::app::ViewMode::Full => build_help_lines(&app.theme),
     };
 
     // Reserve 1 line for the footer hint
@@ -94,6 +94,53 @@ fn key_line(theme: &Theme, key: &str, desc: &str) -> Line<'static> {
 /// Lite's complete key surface — including the keys the footer deliberately
 /// doesn't advertise (navigation and `Esc`, which are `less`/`vim`/`top`
 /// conventions). This overlay is the one place the full set is written down.
+/// Dense advertises its bindings in the box borders, so this overlay exists to
+/// explain what the screen *means* — the keys are only half of it.
+fn build_dense_help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    lines.push(section_header(theme, "NETWATCH DENSE"));
+    lines.push(key_line(theme, "q / Ctrl+C", "Quit"));
+    lines.push(key_line(theme, "V", "Cycle view: full → lite → dense"));
+    lines.push(key_line(theme, "Esc", "Back to the full view"));
+    lines.push(key_line(theme, "p / Space", "Pause/resume"));
+    lines.push(key_line(theme, ",", "Settings"));
+    lines.push(key_line(theme, "?", "Toggle this overlay"));
+    lines.push(Line::from(""));
+
+    lines.push(section_header(theme, "NAVIGATION"));
+    lines.push(key_line(theme, "↑ / k", "Select the previous connection"));
+    lines.push(key_line(theme, "↓ / j", "Select the next connection"));
+    lines.push(key_line(theme, "Home / End", "First / last connection"));
+    lines.push(Line::from(""));
+
+    lines.push(section_header(theme, "READING THE SCREEN"));
+    lines.push(key_line(
+        theme,
+        "graph",
+        "Download grows up, upload grows down",
+    ));
+    lines.push(key_line(
+        theme,
+        "colour",
+        "Height in the graph, not the series",
+    ));
+    lines.push(key_line(
+        theme,
+        "meters",
+        "Red zone is fixed, so you see it coming",
+    ));
+    lines.push(key_line(theme, "--", "Not measured — not the same as zero"));
+    lines.push(Line::from(""));
+
+    lines.push(section_header(theme, "NOTES"));
+    lines.push(key_line(theme, "RTT", "From captured TCP handshakes only"));
+    lines.push(key_line(theme, "cwnd", "Kernel TCP state; Linux + macOS"));
+    lines.push(key_line(theme, "size", "Needs 130×44, then grows to fit"));
+
+    lines
+}
+
 fn build_lite_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -103,6 +150,7 @@ fn build_lite_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line(theme, "/", "Filter by process or host"));
     lines.push(key_line(theme, "↵", "Expand/collapse the selected talker"));
     lines.push(key_line(theme, "L", "Switch to the full view"));
+    lines.push(key_line(theme, "V", "Cycle view: full → lite → dense"));
     lines.push(key_line(theme, "?", "Toggle this overlay"));
     lines.push(Line::from(""));
 
@@ -138,6 +186,12 @@ fn build_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     ));
     lines.push(key_line(theme, "p", "Pause/resume data collection"));
     lines.push(key_line(theme, "r", "Force refresh all data"));
+    lines.push(key_line(
+        theme,
+        "V (shift)",
+        "Cycle view: full → lite → dense (dense needs 130×44)",
+    ));
+    lines.push(key_line(theme, "L (shift)", "Switch to the Lite view"));
     lines.push(key_line(theme, "R (shift)", "Arm/disarm flight recorder"));
     lines.push(key_line(
         theme,

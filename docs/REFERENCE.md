@@ -273,6 +273,8 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 | `T` | Traceroute |
 | `W` | Whois lookup |
 | `t` | Cycle theme |
+| `V` | Cycle view: full → lite → dense (dense needs 130×44, then grows to fit) |
+| `L` | Switch to the Lite view |
 | `,` | Settings |
 | `?` | Help |
 | `q` | Quit |
@@ -343,12 +345,24 @@ production-capture-specific, and that audience is overwhelmingly Linux.
 | `P` | Promote all → `egress-policy.toml` |
 | `e` | Export attributed egress records → `~/netwatch_egress_<ts>.ndjson` |
 
+### Dense view
+| Key | Action |
+|-----|--------|
+| `↑` `↓` / `k` `j` | Select connection (the detail panel follows the selection) |
+| `Home` / `End` | First / last connection |
+| `p` / `Space` | Pause / resume |
+| `V` | Cycle view |
+| `Esc` | Back to the full view |
+| `,` | Settings |
+| `?` | Help |
+| `q` | Quit |
+
 ### Settings
 | Key | Action |
 |-----|--------|
 | `↑` `↓` | Navigate settings |
 | `Enter` | Edit selected setting |
-| `←` `→` | Cycle theme |
+| `←` `→` | Cycle the selected setting (theme, view, graph style, sandbox…) |
 | `S` | Save config |
 | `Esc` | Close |
 

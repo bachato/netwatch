@@ -31,7 +31,7 @@ Most network tools answer one question — *"what's using my bandwidth?"* — an
 
 Think of it as **one zero-config binary that does the job of a bandwidth meter, the triage view of Wireshark, and a lightweight intrusion detector** — without leaving the terminal.
 
-It scales to the question you're asking. `netwatch --lite` is [one 80×24 screen](#lite-view) for *"what's using my network right now?"*; the full ten-tab view is there when the answer is "something I need to investigate" — one keypress apart, sharing the same live capture.
+It scales to the question you're asking — in both directions: [`--view dense`](#dense-view) fills a big terminal with four zero-chrome boxes, and `netwatch --lite` is [one 80×24 screen](#lite-view) for *"what's using my network right now?"*; the full ten-tab view is there when the answer is "something I need to investigate" — one keypress apart, sharing the same live capture.
 
 **Made for** blue-teamers, incident responders, SREs, and homelabbers who need to see what's happening *right now* — not parse a capture file an hour later.
 
@@ -200,6 +200,30 @@ netwatch --lite     # one screen, fits 80×24
 Everything on a single screen: live throughput charts, gateway/DNS/internet reachability, and the top talkers by process and host. Six keys — `q` quit, `p` pause, `/` filter, `↵` expand a talker, `L` back to the full view, `?` help.
 
 Press `L` from either view to switch. Both share the same collectors, so escalating from "something looks off" to the full ten-tab forensics view costs one keypress — no restart, no lost history, capture still running.
+
+### Dense view
+
+The other direction: when you have a big terminal and want *everything* at once, `--view dense` fills it with four boxes and no chrome — no header bar, no menu bar, no status bar. Identity, sort state, page range and every keybind live inside the box borders, so every row carries data. It needs 130×44 as a floor and **grows into whatever you give it**: wider means more history in the plots and room for full hostnames, taller means more interfaces and more connections.
+
+```bash
+netwatch --view dense     # four boxes, needs 130×44
+```
+
+<p align="center">
+  <img src="docs/media/demo-dense.gif" alt="NetWatch Dense: four boxes filling a 133×46 terminal — a mirrored braille throughput graph with download above the time axis and upload below it, per-interface rates with 60-second sparklines, four-hop latency budgets, and a connection table whose selected row's detail is hoisted into the top of the same box carrying kernel cwnd / ssthresh / mss / rwnd" width="900">
+</p>
+
+<p align="center">
+  <em>Four boxes, no chrome rows. Download grows up from the axis, upload grows down. The selected connection's detail — including kernel TCP state — sits at the top of the same box, and <code>V</code> is one keypress to the ten-tab view with the collectors still warm.</em>
+</p>
+
+The signature element is the **mirrored dual graph**: download grows up from a centre time axis, upload grows down from the same axis. Traffic symmetry becomes a shape you recognise without reading a number — a download burst is a cliff above the line, a backup job is a cliff below it. Both halves are braille at two samples per character cell, and every cell is coloured by its **height in the graph** rather than by which series it belongs to, so you see a spike's severity before you measure it against the axis.
+
+Throughput ramps cool→bright because high bandwidth is *busy*, not *bad* — a saturated link during a backup is working. Only bounded values where high genuinely is bad — link saturation, latency budget per hop — get the green→amber→red treatment, and their meters colour by position along the bar, so the red zone is visible before you reach it.
+
+Below the graph: per-interface rates with 60-second sparklines, four-hop latency budgets (gateway, DNS, internet, and the slowest peer you're actually talking to), and the connection table with the selected row's detail hoisted into the top of the same box — no new screen, no back button. The detail row carries kernel TCP state — `cwnd`, `ssthresh`, `mss`, `rwnd` — read straight from the kernel: `inet_diag` over netlink on Linux, the `net.inet.tcp.pcblist64` sysctl on macOS. The two kernels disagree about units (Linux counts segments, BSD counts bytes), so macOS values are normalised against the MSS and the column means the same thing on both. Windows reads `--` until `GetPerTcpConnectionEStats` is wired up.
+
+`V` cycles `full → lite → dense`, or set it once under **Settings → View**. Below 130×44 it falls back to the same 80×24 grid Lite targets — which fills its area too — and it never scrolls sideways.
 
 ## Deeper dives
 

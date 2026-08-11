@@ -70,6 +70,82 @@ pub fn default_route_interface() -> Option<String> {
     None
 }
 
+/// Negotiated link speed in bits per second, when the OS will tell us.
+///
+/// Feeds the Dense view's saturation meter: "51% of a 1 Gb link" is a fact
+/// about your network, while "51% of the busiest second we've seen" is a fact
+/// about our own sampling. Only the first is worth a red zone, so where this
+/// returns `None` the meter re-labels itself rather than inventing a ceiling.
+///
+/// Two cfg'd definitions rather than one function with cfg'd blocks: the block
+/// form leaves a `return` that is needless on exactly one platform, which is a
+/// lint you only see on that platform's CI.
+#[cfg(target_os = "linux")]
+pub fn link_speed_bps(iface: &str) -> Option<u64> {
+    // /sys/class/net/<if>/speed is in Mb/s, and reads -1 (or fails with
+    // EINVAL) for virtual, down, or wireless interfaces that can't report one.
+    let raw = std::fs::read_to_string(format!("/sys/class/net/{iface}/speed")).ok()?;
+    let mbps: i64 = raw.trim().parse().ok()?;
+    if mbps <= 0 {
+        return None;
+    }
+    Some(mbps as u64 * 1_000_000)
+}
+
+/// macOS: `ifi_baudrate` from `getifaddrs`, which is the link's currently
+/// negotiated rate — a real gigabit figure on Ethernet, and the live PHY rate
+/// on Wi-Fi (it moves as the radio renegotiates, because the capacity really
+/// does move).
+///
+/// `getifaddrs` is a syscall, deliberately: this is read on every refresh, and
+/// the rest of this module already shells out to `netstat`/`ifconfig` per tick.
+/// Adding a fourth fork to the tick path to fetch one integer would be a poor
+/// trade.
+#[cfg(target_os = "macos")]
+pub fn link_speed_bps(iface: &str) -> Option<u64> {
+    use std::ffi::CStr;
+
+    let mut ifap: *mut nix::libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` fills `ifap` with an owned list we free below; every
+    // pointer is null-checked before it is read.
+    if unsafe { nix::libc::getifaddrs(&mut ifap) } != 0 || ifap.is_null() {
+        return None;
+    }
+    let mut speed = None;
+    let mut cur = ifap;
+    while !cur.is_null() {
+        let entry = unsafe { &*cur };
+        cur = entry.ifa_next;
+        if entry.ifa_addr.is_null() || entry.ifa_data.is_null() {
+            continue;
+        }
+        // Only the AF_LINK entry carries `if_data`; the AF_INET ones don't.
+        if i32::from(unsafe { (*entry.ifa_addr).sa_family }) != nix::libc::AF_LINK {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(entry.ifa_name) };
+        if name.to_string_lossy() != iface {
+            continue;
+        }
+        let data = unsafe { &*(entry.ifa_data as *const nix::libc::if_data) };
+        if data.ifi_baudrate > 0 {
+            speed = Some(u64::from(data.ifi_baudrate));
+        }
+        break;
+    }
+    // SAFETY: `ifap` came from a successful `getifaddrs` and is freed once.
+    unsafe { nix::libc::freeifaddrs(ifap) };
+    speed
+}
+
+/// Windows would come from `GetIfEntry2`'s `TransmitLinkSpeed`; not wired up
+/// yet, so the saturation meter falls back to labelling itself against the
+/// observed peak rather than inventing a ceiling.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn link_speed_bps(_iface: &str) -> Option<u64> {
+    None
+}
+
 pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
     #[cfg(target_os = "linux")]
     return linux::collect_interface_info();
@@ -82,4 +158,28 @@ pub fn collect_interface_info() -> Result<Vec<InterfaceInfo>> {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     anyhow::bail!("Unsupported platform")
+}
+
+#[cfg(test)]
+mod link_speed_tests {
+    /// Talks to the running kernel, so it is environment-dependent and
+    /// `#[ignore]`d. Run it to see what your link actually reports:
+    /// `cargo test --lib link_speed -- --ignored --nocapture`
+    ///
+    /// A saturation meter is only worth drawing if this returns a real
+    /// capacity; where it returns `None` the meter has to say so rather than
+    /// invent a ceiling.
+    #[test]
+    #[ignore]
+    fn live_link_speed_is_plausible() {
+        for iface in ["en0", "eth0", "wlan0"] {
+            if let Some(bps) = super::link_speed_bps(iface) {
+                println!("{iface}: {bps} bps ({} Mb)", bps / 1_000_000);
+                assert!(
+                    (1_000_000..=800_000_000_000u64).contains(&bps),
+                    "{iface} reported {bps} bps, which is not a link speed"
+                );
+            }
+        }
+    }
 }

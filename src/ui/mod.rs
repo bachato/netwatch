@@ -1,5 +1,6 @@
 pub mod connections;
 pub mod dashboard;
+pub mod dense;
 pub mod egress;
 pub mod help;
 pub mod insights;

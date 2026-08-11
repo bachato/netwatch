@@ -303,6 +303,40 @@ pub enum ViewMode {
     #[default]
     Full,
     Lite,
+    /// The high-density four-box screen. Like Lite it is opt-in and shares the
+    /// same collectors and tick loop, so cycling between views is instant and
+    /// loses no history. See [`crate::ui::dense`].
+    Dense,
+}
+
+/// Config / CLI spellings, in cycle order. `V` walks this list.
+pub const VIEW_MODE_NAMES: &[&str] = &["full", "lite", "dense"];
+
+impl ViewMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewMode::Full => "full",
+            ViewMode::Lite => "lite",
+            ViewMode::Dense => "dense",
+        }
+    }
+
+    pub fn by_name(name: &str) -> ViewMode {
+        match name.to_lowercase().as_str() {
+            "lite" => ViewMode::Lite,
+            "dense" => ViewMode::Dense,
+            _ => ViewMode::Full,
+        }
+    }
+
+    /// Next view in cycle order — what `V` does.
+    pub fn next(self) -> ViewMode {
+        match self {
+            ViewMode::Full => ViewMode::Lite,
+            ViewMode::Lite => ViewMode::Dense,
+            ViewMode::Dense => ViewMode::Full,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -453,6 +487,10 @@ pub struct App {
     pub ui: AppUiState,
     pub theme: Theme,
     pub graph_style: crate::graph::GraphStyle,
+    /// Kernel TCP state (cwnd / ssthresh / mss / rwnd) per flow. Only the
+    /// Dense view reads it, and only Linux populates it today — see
+    /// [`crate::collectors::tcp_info`].
+    pub tcp_info: crate::collectors::tcp_info::TcpInfoCollector,
     pub process_bandwidth: ProcessBandwidthCollector,
     pub insights_collector: Option<crate::collectors::insights::InsightsCollector>,
     incident_capture_started: bool,
@@ -640,6 +678,7 @@ impl App {
             ui,
             theme,
             graph_style,
+            tcp_info: crate::collectors::tcp_info::TcpInfoCollector::new(),
             process_bandwidth: ProcessBandwidthCollector::new(),
             insights_collector,
             incident_capture_started: false,
@@ -732,6 +771,23 @@ impl App {
 
     fn is_loopback_name(name: &str) -> bool {
         name == "lo" || name == "lo0"
+    }
+
+    /// Kernel TCP state for a flow, keyed the way the connection table renders
+    /// addresses. `None` when the platform has no collector, when the dump
+    /// hasn't run yet, or when the flow simply isn't established — all three
+    /// render the same dim `--`, because all three mean "we don't know".
+    pub fn tcp_info_for(
+        &self,
+        local: &str,
+        remote: &str,
+    ) -> Option<crate::collectors::tcp_info::TcpInfo> {
+        self.tcp_info.get(local, remote)
+    }
+
+    /// Negotiated link speed of the capture interface, in bits per second.
+    pub fn link_speed_bps(&self) -> Option<u64> {
+        platform::link_speed_bps(&self.capture_interface)
     }
 
     fn pick_capture_interface(info: &[InterfaceInfo], default_route_dev: Option<&str>) -> String {
@@ -1179,6 +1235,11 @@ impl App {
             let dns = self.config_collector.config.primary_dns();
             self.health_prober.probe(gateway.as_deref(), dns.as_deref());
             self.process_bandwidth.refresh_cpu();
+            // Only the Dense view renders these, and a netlink dump on a busy
+            // host isn't free — so don't pay for it in the views that ignore it.
+            if self.ui.view_mode == ViewMode::Dense {
+                self.tcp_info.update();
+            }
         }
 
         // Feed AI insights collector with a fresh network snapshot
@@ -1356,11 +1417,17 @@ pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     remote: Option<&crate::remote::RemotePublisher>,
     sandbox_mode: crate::sandbox::Mode,
-    lite: bool,
+    view: Option<ViewMode>,
 ) -> Result<()> {
     let mut app = App::new();
-    if lite {
-        app.ui.view_mode = ViewMode::Lite;
+    // CLI wins over the saved config: `--view dense` is a decision about this
+    // run, not a change to the user's default.
+    if let Some(v) = view {
+        app.ui.view_mode = v;
+        // Keep the settings modal honest: it renders the in-memory config, and
+        // showing "full" while the screen is plainly Dense makes the row look
+        // broken. Nothing is written to disk unless the user presses `S`.
+        app.user_config.view = v.name().to_string();
     }
 
     // Apply the security sandbox after App::new finishes — pcap handles,
@@ -1440,6 +1507,7 @@ pub async fn run<B: Backend>(
             }
             match app.ui.view_mode {
                 ViewMode::Lite => ui::lite::render(f, &app, area),
+                ViewMode::Dense => ui::dense::render(f, &app, area),
                 ViewMode::Full => match app.ui.current_tab {
                     Tab::Dashboard => ui::dashboard::render(f, &app, area),
                     Tab::Connections => ui::connections::render(f, &app, area),
@@ -1679,6 +1747,57 @@ pub const TOP_CONN_HISTORY_LEN: usize = 30;
 /// Six keys are advertised in the footer (`q p / ↵ L ?`); navigation and `Esc`
 /// are deliberately unadvertised because they're conventions from
 /// `less`/`vim`/`top`. The `?` overlay lists everything.
+/// Step to the next view and remember it as the new default.
+///
+/// One implementation called from every key handler. `V` is advertised in all
+/// three views' help, but the binding was copy-pasted per handler and Lite's
+/// copy was never written — so the cycle silently dead-ended there, in the one
+/// view whose help screen also promised it.
+fn cycle_view(app: &mut App) {
+    app.ui.view_mode = app.ui.view_mode.next();
+    app.user_config.view = app.ui.view_mode.name().to_string();
+    // Leaving Lite closes its detail pane, exactly as `L` does — otherwise it
+    // reopens on whatever row is selected when you cycle back around.
+    if app.ui.view_mode != ViewMode::Lite {
+        app.ui.lite.detail_open = false;
+    }
+}
+
+/// Dense's key surface.
+///
+/// Deliberately small, for the same reason Lite's is: the view advertises its
+/// bindings in the box borders, and a binding that isn't written on the screen
+/// may as well not exist. Everything here appears in a footer somewhere.
+fn handle_dense_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    let conn_count = app.connection_collector.connections().len();
+    match key.code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('V') | KeyCode::Char('v') => cycle_view(app),
+        KeyCode::Char('L') => app.ui.view_mode = ViewMode::Lite,
+        KeyCode::Esc => app.ui.view_mode = ViewMode::Full,
+        KeyCode::Char('?') => app.ui.show_help = true,
+        KeyCode::Char('p') | KeyCode::Char(' ') => app.ui.paused = !app.ui.paused,
+        KeyCode::Char(',') => {
+            app.ui.show_settings = !app.ui.show_settings;
+            app.ui.settings_editing = false;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.ui.scroll.connection_scroll = app.ui.scroll.connection_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            // Clamp to the live row count so the detail panel can never point
+            // at a connection that has already closed.
+            let last = conn_count.saturating_sub(1);
+            app.ui.scroll.connection_scroll = (app.ui.scroll.connection_scroll + 1).min(last);
+        }
+        KeyCode::Home => app.ui.scroll.connection_scroll = 0,
+        KeyCode::End => app.ui.scroll.connection_scroll = conn_count.saturating_sub(1),
+        _ => {}
+    }
+    false
+}
+
 fn handle_lite_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     use crate::ui::lite;
 
@@ -1722,6 +1841,7 @@ fn handle_lite_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.ui.lite.detail_open = false;
             app.ui.lite.filter_input = false;
         }
+        KeyCode::Char('V') | KeyCode::Char('v') => cycle_view(app),
         KeyCode::Char('?') => app.ui.show_help = true,
         KeyCode::Char('p') => app.ui.paused = !app.ui.paused,
         KeyCode::Char('/') => {
@@ -1808,7 +1928,13 @@ fn update_top_conn_history(
 
 /// Strip the trailing :port from a remote_addr; preserves IPv6 brackets.
 /// Must match the grouping key used in `dashboard::render_top_connections`.
-fn top_conn_host(addr: &str) -> String {
+/// The host half of a `top_conn_history` key.
+///
+/// `pub(crate)` because every view that looks that cache up must key it
+/// exactly the same way — Dense split addresses with its own helper, which
+/// strips the brackets this keeps, so the sparkline lookup missed on every
+/// IPv6 row and those rows drew a flat baseline as if they were idle.
+pub(crate) fn top_conn_host(addr: &str) -> String {
     if let Some(stripped) = addr.strip_prefix('[') {
         if let Some(end) = stripped.find("]:") {
             return format!("[{}]", &stripped[..end]);
@@ -2218,14 +2344,21 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     if app.ui.show_help {
         return handle_help_key(app, key);
     }
+    // The settings modal owns input whenever it is open, in every view. It has
+    // to: the View row switches the live view, so if the per-view handlers ran
+    // first, changing the setting to Lite would hand the next keystroke to
+    // Lite's handler and leave the open modal with no way to control it.
+    if app.ui.show_settings {
+        return handle_settings_key(app, key);
+    }
     // Lite owns its whole key surface — the full TUI's ~40 bindings would
     // undermine the point of the view. Handled after the help overlay so `?`
     // still works, and before everything else.
     if app.ui.view_mode == ViewMode::Lite {
         return handle_lite_key(app, key);
     }
-    if app.ui.show_settings {
-        return handle_settings_key(app, key);
+    if app.ui.view_mode == ViewMode::Dense {
+        return handle_dense_key(app, key);
     }
     if app.ui.show_memory_stats {
         // Tiny dedicated handler — Esc / M close, q / Ctrl-C still quit.
@@ -2415,6 +2548,27 @@ fn handle_settings_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 app.user_config.theme = names[next].to_string();
                 app.theme = crate::theme::by_name(names[next]);
                 app.ui.settings_status = Some(format!("Theme: {}", names[next]));
+                app.ui.settings_status_tick = 0;
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
+                if app.ui.settings_cursor == ui::settings::cursor::VIEW =>
+            {
+                let names = VIEW_MODE_NAMES;
+                let current = names
+                    .iter()
+                    .position(|&n| n == app.user_config.view)
+                    .unwrap_or(0);
+                let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
+                let next = if forward {
+                    (current + 1) % names.len()
+                } else {
+                    (current + names.len() - 1) % names.len()
+                };
+                app.user_config.view = names[next].to_string();
+                // Switch live, not on restart: a view setting you can't see the
+                // effect of is a setting you can't evaluate. `S` still saves.
+                app.ui.view_mode = ViewMode::by_name(names[next]);
+                app.ui.settings_status = Some(format!("View: {}", names[next]));
                 app.ui.settings_status_tick = 0;
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
@@ -2704,6 +2858,9 @@ fn handle_main_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
         }
         // The other half of the Lite toggle; `handle_lite_key` owns Lite→Full.
         KeyCode::Char('L') => app.ui.view_mode = ViewMode::Lite,
+        // `V` walks full → lite → dense → full. `L` still jumps straight to
+        // Lite, so nobody's muscle memory breaks.
+        KeyCode::Char('V') | KeyCode::Char('v') => cycle_view(app),
         KeyCode::Char('1') => app.ui.current_tab = Tab::Dashboard,
         KeyCode::Char('2') => app.ui.current_tab = Tab::Connections,
         KeyCode::Char('3') => app.ui.current_tab = Tab::Interfaces,
@@ -3261,6 +3418,47 @@ fn top_remote_ips(app: &App) -> Vec<(String, usize)> {
 pub(crate) fn sort_connections(conns: &mut [Connection], column: usize) {
     crate::ui::connections::sort(conns, column, true);
 }
+#[cfg(test)]
+mod view_cycle_tests {
+    use super::ViewMode;
+
+    /// `V` is advertised in every view's help, so it must land somewhere from
+    /// every view. The first cut implemented it in two handlers out of three.
+    #[test]
+    fn v_cycles_through_every_view_and_returns() {
+        let mut seen = vec![ViewMode::Full];
+        let mut v = ViewMode::Full;
+        for _ in 0..3 {
+            v = v.next();
+            seen.push(v);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                ViewMode::Full,
+                ViewMode::Lite,
+                ViewMode::Dense,
+                ViewMode::Full
+            ],
+            "the cycle must visit every view and close"
+        );
+    }
+
+    /// Every view's name must round-trip, or the settings row and `--view`
+    /// disagree with what `V` just set.
+    #[test]
+    fn every_view_name_round_trips() {
+        for name in super::VIEW_MODE_NAMES {
+            assert_eq!(ViewMode::by_name(name).name(), *name);
+        }
+        let mut v = ViewMode::Full;
+        for _ in 0..3 {
+            assert!(super::VIEW_MODE_NAMES.contains(&v.name()));
+            v = v.next();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
