@@ -114,7 +114,7 @@ impl NetworkSnapshot {
         }
 
         let mut top_talkers: Vec<(String, usize)> = dst_counts.into_iter().collect();
-        top_talkers.sort_by(|a, b| b.1.cmp(&a.1));
+        top_talkers.sort_by_key(|b| std::cmp::Reverse(b.1));
         top_talkers.truncate(10);
 
         let connections_established = connections

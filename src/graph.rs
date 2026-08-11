@@ -273,9 +273,7 @@ pub fn fade_color(base: Color, bg: Color, alpha: f32, defer_to_terminal: bool) -
         return base;
     }
     let alpha = alpha.clamp(0.0, 1.0);
-    let (br, bgc, bb) = match to_rgb_or_default(base, (255, 255, 255)) {
-        rgb => rgb,
-    };
+    let (br, bgc, bb) = to_rgb_or_default(base, (255, 255, 255));
     let (gr, gg, gb) = to_rgb_or_default(bg, (0, 0, 0));
     Color::Rgb(
         lerp_u8(gr, br, alpha),

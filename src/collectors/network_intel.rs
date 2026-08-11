@@ -277,7 +277,7 @@ impl NetworkIntelCollector {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|b| std::cmp::Reverse(b.1));
         top.truncate(TOP_DOMAINS_COUNT);
         DnsAnalytics {
             total_queries: self.dns_total_queries,
@@ -714,7 +714,7 @@ impl NetworkIntelCollector {
         // Prune domain counts to top N
         if self.domain_counts.len() > MAX_TRACKED_DOMAINS * 2 {
             let mut entries: Vec<(String, u32)> = self.domain_counts.drain().collect();
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.sort_by_key(|b| std::cmp::Reverse(b.1));
             entries.truncate(MAX_TRACKED_DOMAINS);
             self.domain_counts = entries.into_iter().collect();
         }

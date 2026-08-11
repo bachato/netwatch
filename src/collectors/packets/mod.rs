@@ -2141,7 +2141,7 @@ fn build_packet(
     tcp_flags: Option<u8>,
     tcp_seq: Option<u32>,
 ) -> CapturedPacket {
-    let mut cnt = crate::app::safe_lock(&counter, "packets::counter");
+    let mut cnt = crate::app::safe_lock(counter, "packets::counter");
     *cnt += 1;
     let id = *cnt;
     let now = chrono::Local::now();

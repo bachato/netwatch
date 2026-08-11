@@ -389,6 +389,7 @@ pub(crate) fn record_rtt_sample(
 }
 
 /// Per-tab scroll positions and selection state.
+#[derive(Default)]
 pub struct UiScrollState {
     pub connection_scroll: usize,
     pub packet_scroll: usize,
@@ -402,25 +403,6 @@ pub struct UiScrollState {
     pub process_scroll: usize,
     pub insights_scroll: usize,
     pub egress_scroll: usize,
-}
-
-impl Default for UiScrollState {
-    fn default() -> Self {
-        Self {
-            connection_scroll: 0,
-            packet_scroll: 0,
-            packet_selected: None,
-            stream_scroll: 0,
-            stats_scroll: 0,
-            help_scroll: 0,
-            topology_scroll: 0,
-            traceroute_scroll: 0,
-            timeline_scroll: 0,
-            process_scroll: 0,
-            insights_scroll: 0,
-            egress_scroll: 0,
-        }
-    }
 }
 
 pub struct App {
@@ -692,11 +674,11 @@ impl App {
     pub fn attribution_status(&self) -> AttributionStatus {
         #[cfg(target_os = "macos")]
         {
-            return match self.pktap_status() {
+            match self.pktap_status() {
                 PktapStatus::NotApplicable => AttributionStatus::Lsof,
                 PktapStatus::Active => AttributionStatus::Active("pktap"),
                 PktapStatus::Failed(e) => AttributionStatus::Failed("pktap", e),
-            };
+            }
         }
         #[cfg(all(not(target_os = "macos"), feature = "ebpf"))]
         {
@@ -2209,7 +2191,7 @@ fn scroll_tab(app: &mut App, delta: isize) {
             let max = app.traffic.interface_count().saturating_sub(1);
             app.ui.selected_interface = match (app.ui.selected_interface, delta < 0) {
                 (Some(0) | None, true) => None,
-                (None, false) => Some(0_usize.min(max)),
+                (None, false) => Some(0_usize),
                 (Some(i), _) => Some(clamp_scroll(i, delta, max)),
             };
         }
@@ -3271,7 +3253,7 @@ fn top_remote_ips(app: &App) -> Vec<(String, usize)> {
     sort(&mut public);
     local
         .into_iter()
-        .chain(public.into_iter())
+        .chain(public)
         .map(|(ip, _, count, _)| (ip, count))
         .collect()
 }
@@ -3430,7 +3412,9 @@ mod tests {
         use std::cmp::Ordering;
         assert_eq!(cmp_f64(1.0, 2.0), Ordering::Less);
         assert_eq!(cmp_f64(2.0, 1.0), Ordering::Greater);
-        assert_eq!(cmp_f64(3.14, 3.14), Ordering::Equal);
+        // Not 3.14: clippy reads that as an approximation of PI, and the
+        // value here is arbitrary — any non-integral pair proves equality.
+        assert_eq!(cmp_f64(2.75, 2.75), Ordering::Equal);
     }
 
     #[test]

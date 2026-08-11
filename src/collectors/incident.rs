@@ -441,7 +441,7 @@ impl IncidentRecorder {
         }
 
         let mut top_protocols: Vec<(String, usize)> = protocol_counts.into_iter().collect();
-        top_protocols.sort_by(|a, b| b.1.cmp(&a.1));
+        top_protocols.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let latest_health = self.health_snapshots.back().map(|s| &s.value);
         let latest_dns = self.dns_snapshots.back().map(|s| &s.value);
@@ -535,7 +535,7 @@ impl IncidentRecorder {
                 out.push_str("- No active connections in latest snapshot\n");
             } else {
                 let mut endpoints: Vec<(String, usize)> = counts.into_iter().collect();
-                endpoints.sort_by(|a, b| b.1.cmp(&a.1));
+                endpoints.sort_by_key(|b| std::cmp::Reverse(b.1));
                 for (remote, count) in endpoints.into_iter().take(5) {
                     out.push_str(&format!("- `{}` — {} connections\n", remote, count));
                 }

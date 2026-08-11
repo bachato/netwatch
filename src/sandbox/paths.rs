@@ -95,9 +95,11 @@ mod tests {
 
     #[test]
     fn empty_geoip_paths_resolve_to_none() {
-        let mut cfg = NetwatchConfig::default();
-        cfg.geoip_db = String::new();
-        cfg.geoip_asn_db = String::new();
+        let cfg = NetwatchConfig {
+            geoip_db: String::new(),
+            geoip_asn_db: String::new(),
+            ..Default::default()
+        };
         let paths = SandboxPaths::from_config(&cfg);
         assert!(paths.geoip_db_dir.is_none());
         assert!(paths.geoip_asn_db_dir.is_none());
@@ -105,8 +107,10 @@ mod tests {
 
     #[test]
     fn absolute_geoip_path_extracts_parent() {
-        let mut cfg = NetwatchConfig::default();
-        cfg.geoip_db = "/usr/share/GeoIP/GeoLite2-City.mmdb".to_string();
+        let cfg = NetwatchConfig {
+            geoip_db: "/usr/share/GeoIP/GeoLite2-City.mmdb".to_string(),
+            ..Default::default()
+        };
         let paths = SandboxPaths::from_config(&cfg);
         assert_eq!(
             paths.geoip_db_dir.as_deref(),
@@ -116,8 +120,10 @@ mod tests {
 
     #[test]
     fn bare_filename_geoip_falls_back_to_cwd() {
-        let mut cfg = NetwatchConfig::default();
-        cfg.geoip_db = "city.mmdb".to_string();
+        let cfg = NetwatchConfig {
+            geoip_db: "city.mmdb".to_string(),
+            ..Default::default()
+        };
         let paths = SandboxPaths::from_config(&cfg);
         assert_eq!(
             paths.geoip_db_dir.as_deref(),

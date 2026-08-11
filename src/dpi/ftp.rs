@@ -43,7 +43,7 @@ impl Classifier for FtpClassifier {
         // Client command: first whitespace-delimited token, upper-cased.
         let verb_raw = line.split_whitespace().next()?;
         let verb = verb_raw.to_ascii_uppercase();
-        if KNOWN_VERBS.iter().any(|&v| v == verb.as_str()) {
+        if KNOWN_VERBS.contains(&verb.as_str()) {
             return Some(AppProtocol::Ftp { command: verb });
         }
         None

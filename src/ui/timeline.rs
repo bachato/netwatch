@@ -97,7 +97,7 @@ fn build_events(app: &App) -> Vec<Event> {
 
     // Network-intel alerts
     for alert in app.network_intel.active_alerts() {
-        events.push(alert_to_event(&alert));
+        events.push(alert_to_event(alert));
     }
 
     // Connection lifecycle from ConnectionTimeline.tracked
@@ -214,7 +214,7 @@ fn build_events(app: &App) -> Vec<Event> {
         });
     }
 
-    events.sort_by(|a, b| b.when.cmp(&a.when));
+    events.sort_by_key(|b| std::cmp::Reverse(b.when));
     events
 }
 

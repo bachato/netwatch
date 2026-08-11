@@ -1559,7 +1559,7 @@ mod tests {
         // A payload longer than the on-screen cap must still appear in full
         // on the clipboard — `y` is the "see the whole thing" affordance.
         let mut body = b"GET /verify HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
-        body.extend(std::iter::repeat(b'Z').take(4000));
+        body.extend(std::iter::repeat_n(b'Z', 4000));
         let out = format_packet_for_clipboard(&pkt_with_decrypted(Some(body.clone())), &[]);
         assert!(out.contains("── TLS decrypted (4043 bytes) ──"));
         assert!(out.contains("GET /verify HTTP/1.1"));

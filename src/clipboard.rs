@@ -18,7 +18,7 @@ pub fn copy(text: &str) -> io::Result<&'static str> {
     #[cfg(target_os = "macos")]
     {
         run("pbcopy", &[], text)?;
-        return Ok("pbcopy");
+        Ok("pbcopy")
     }
 
     #[cfg(target_os = "linux")]

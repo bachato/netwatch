@@ -42,8 +42,8 @@ fn main() {
     let port = listener.local_addr().unwrap().port();
     // Accept-and-drain in the background so curl's request completes cleanly.
     thread::spawn(move || {
-        for stream in listener.incoming() {
-            if let Ok(mut s) = stream {
+        for mut s in listener.incoming().flatten() {
+            {
                 let mut buf = [0u8; 256];
                 let _ = s.read(&mut buf);
                 // minimal HTTP reply so curl exits 0

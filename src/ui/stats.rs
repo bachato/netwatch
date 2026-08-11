@@ -502,7 +502,7 @@ fn render_processes_breakdown(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|p| p.rx_bytes > 0)
         .collect();
-    by_rx.sort_by(|a, b| b.rx_bytes.cmp(&a.rx_bytes));
+    by_rx.sort_by_key(|b| std::cmp::Reverse(b.rx_bytes));
 
     if by_rx.is_empty() {
         render_breakdown_panel(f, app, area, "TOP PROCESSES  by RX", Vec::new());
@@ -558,7 +558,7 @@ fn render_remotes_breakdown(f: &mut Frame, app: &App, packets: &[CapturedPacket]
     }
 
     let mut sorted: Vec<(String, u64)> = totals.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let palette = remote_palette(t);
     let mut items: Vec<BreakdownItem> = sorted

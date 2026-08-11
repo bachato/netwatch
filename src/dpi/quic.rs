@@ -464,7 +464,7 @@ fn unprotect_header(
 }
 
 fn decrypt_payload(
-    buf: &mut Vec<u8>,
+    buf: &mut [u8],
     header: &LongHeader,
     keys: &InitialKeys,
     pn: u64,
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn detects_quic_v1_initial() {
         let mut payload = vec![0xC0, 0x00, 0x00, 0x00, 0x01];
-        payload.extend(std::iter::repeat(0u8).take(64));
+        payload.extend(std::iter::repeat_n(0u8, 64));
         // Even if SNI extraction fails on this synthetic packet, the
         // detection returns Some(Quic { sni: None }).
         match QuicClassifier.classify(&payload, false) {

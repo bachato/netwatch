@@ -1031,8 +1031,8 @@ mod tests {
         );
     }
 
-    /// Wrong sequence number (decrypting record 0 as if it were record
-    /// 1) changes the nonce and must fail authentication — guards the
+    /// Wrong sequence number (decrypting record 0 as if it were record 1)
+    /// changes the nonce and must fail authentication — guards the
     /// per-direction `next_seq` counter against silent corruption.
     #[test]
     fn decrypt_record_wrong_sequence_fails_auth() {
@@ -1071,7 +1071,7 @@ mod tests {
     /// ciphertext at sequence `seq`, using the same key schedule the
     /// decrypter derives. Returns (aad, ciphertext_with_tag).
     fn seal_record(seq: u64, plaintext: &[u8], content_type: u8) -> (Vec<u8>, Vec<u8>) {
-        let mut keys = DirectionKeys::from_traffic_secret(
+        let keys = DirectionKeys::from_traffic_secret(
             CipherSuite::Aes128GcmSha256,
             &RFC8448_CLIENT_SECRET,
         );
@@ -1246,7 +1246,7 @@ mod tests {
         // Seal an application-data record at seq 0 under the gen-1 keys.
         let plaintext = b"post-keyupdate application data".to_vec();
         let (aad, sealed) = {
-            let mut k = DirectionKeys::from_traffic_secret(suite, &gen1);
+            let k = DirectionKeys::from_traffic_secret(suite, &gen1);
             let mut buf = plaintext.clone();
             buf.push(0x17); // inner content_type = application_data
             let total = buf.len() + k.aead.algorithm().tag_len();

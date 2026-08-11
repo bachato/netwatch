@@ -35,8 +35,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # `-D`, not `-W`. Warnings that never fail anything accumulate until
+      # nobody reads them — this repo had 54 before they were cleared, which
+      # is exactly enough noise to hide a real one. Lints that are genuinely
+      # not worth following are declared as `#![allow]` with a reason at the
+      # top of src/lib.rs, so a warning reaching CI now means something new.
       - name: Clippy
-        run: cargo clippy -- -W clippy::all
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
         run: cargo build --release

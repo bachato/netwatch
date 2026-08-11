@@ -162,7 +162,7 @@ fn build_cards(app: &App) -> Vec<Card> {
             .into_iter()
             .filter(|(_, n)| *n >= 10)
             .collect();
-        piles.sort_by(|a, b| b.1.cmp(&a.1));
+        piles.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (proc, n) in piles.into_iter().take(2) {
             cards.push(Card {
                 severity: Severity::Warn,
@@ -509,8 +509,8 @@ fn render_empty_state(f: &mut Frame, app: &App, area: Rect) {
             "  AI-generated insights are disabled in your config.",
             Style::default().fg(t.text_muted),
         )));
-    } else {
-        let status = app.insights_collector.as_ref().unwrap().get_status();
+    } else if let Some(collector) = app.insights_collector.as_ref() {
+        let status = collector.get_status();
         if matches!(&*status, InsightsStatus::OllamaUnavailable) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(

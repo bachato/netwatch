@@ -1459,12 +1459,12 @@ fn render_detail_left(f: &mut Frame, app: &App, area: Rect, conn: &Connection) {
         Line::from(Span::styled("FLOW", Style::default().fg(t.text_muted))),
         Line::from(vec![
             Span::styled(
-                format!("{}", conn.local_addr),
+                conn.local_addr.to_string(),
                 Style::default().fg(t.text_primary),
             ),
             Span::styled("  →  ", Style::default().fg(t.text_muted)),
             Span::styled(
-                format!("{}", conn.remote_addr),
+                conn.remote_addr.to_string(),
                 Style::default().fg(t.text_primary),
             ),
         ]),

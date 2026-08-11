@@ -37,10 +37,8 @@ impl Classifier for SsdpClassifier {
             let lower = l.to_ascii_lowercase();
             if let Some(v) = lower.strip_prefix("st:") {
                 Some(v.trim().to_string())
-            } else if let Some(v) = lower.strip_prefix("nt:") {
-                Some(v.trim().to_string())
             } else {
-                None
+                lower.strip_prefix("nt:").map(|v| v.trim().to_string())
             }
         });
 
