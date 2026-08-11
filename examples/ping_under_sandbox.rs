@@ -43,10 +43,9 @@ fn main() {
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let s = prober.status();
-        if s.gateway_rtt_ms.is_some() {
+        if let Some(rtt) = s.gateway_rtt_ms {
             println!(
-                "OK   gateway rtt = {:.2} ms, loss = {:.1}%",
-                s.gateway_rtt_ms.unwrap(),
+                "OK   gateway rtt = {rtt:.2} ms, loss = {:.1}%",
                 s.gateway_loss_pct
             );
             return;

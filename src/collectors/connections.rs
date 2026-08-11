@@ -929,11 +929,15 @@ fn socket_inode_owners() -> HashMap<u64, (u32, String)> {
 /// Index of the kernel socket tables: a 5-tuple map for precise matches and a
 /// local-endpoint map as a fallback for sockets with no distinct peer (UDP,
 /// LISTEN). Values are socket inodes joined against `socket_inode_owners()`.
+/// `(address, port)` — one end of a socket as `/proc/net/*` reports it.
+#[cfg(target_os = "linux")]
+type Endpoint = (std::net::IpAddr, u16);
+
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct ProcNetIndex {
-    by_pair: HashMap<((std::net::IpAddr, u16), (std::net::IpAddr, u16)), u64>,
-    by_local: HashMap<(std::net::IpAddr, u16), u64>,
+    by_pair: HashMap<(Endpoint, Endpoint), u64>,
+    by_local: HashMap<Endpoint, u64>,
 }
 
 #[cfg(target_os = "linux")]

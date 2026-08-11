@@ -682,13 +682,13 @@ impl App {
         }
         #[cfg(all(not(target_os = "macos"), feature = "ebpf"))]
         {
-            return match (self.conn_tracker.as_ref(), self.ebpf_init_error.as_ref()) {
+            match (self.conn_tracker.as_ref(), self.ebpf_init_error.as_ref()) {
                 (Some(_), _) => AttributionStatus::Active("ebpf"),
                 (None, Some(err)) => AttributionStatus::Failed("ebpf", err.clone()),
                 // Defensive: if neither tracker nor error are present
                 // something's wrong with init logic — surface that.
                 (None, None) => AttributionStatus::Failed("ebpf", "init never attempted".into()),
-            };
+            }
         }
         #[cfg(all(not(target_os = "macos"), not(feature = "ebpf")))]
         {

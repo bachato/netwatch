@@ -309,8 +309,10 @@ mod tests {
         // dir slips back into the read-only bucket, NetwatchConfig::save()
         // breaks under Landlock and users get trapped in whatever sandbox
         // mode they launched with.
-        let mut paths = SandboxPaths::default();
-        paths.config_dir = Some(PathBuf::from("/tmp/netwatch-test-cfg"));
+        let paths = SandboxPaths {
+            config_dir: Some(PathBuf::from("/tmp/netwatch-test-cfg")),
+            ..Default::default()
+        };
         let rw = collect_read_write(&paths);
         assert!(
             rw.iter().any(|p| p == Path::new("/tmp/netwatch-test-cfg")),

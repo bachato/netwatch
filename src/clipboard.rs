@@ -45,10 +45,10 @@ pub fn copy(text: &str) -> io::Result<&'static str> {
                 });
             }
         }
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::NotFound,
             "no clipboard tool found (install wl-clipboard, xclip, or xsel)",
-        ));
+        ))
     }
 
     #[cfg(target_os = "windows")]
