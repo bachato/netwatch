@@ -18,11 +18,19 @@
 </p>
 
 <p align="center">
+  <img src="docs/media/demo-dense.gif" alt="NetWatch Dense: four boxes filling the terminal — a mirrored braille throughput graph with download growing up from the time axis and upload growing down from it, per-interface rates with 60-second sparklines, four-hop latency budgets, and a connection table whose selected row's detail is hoisted into the top of the same box carrying kernel cwnd / ssthresh / mss / rwnd" width="900">
+</p>
+
+<p align="center">
+  <em>Everything at once, with <strong>zero rows of chrome</strong> — no header bar, no menu bar, no status bar. Download grows up from the shared time axis, upload grows down from it, so traffic symmetry is a shape you recognise before you read a number. Colour encodes magnitude, not series.</em>
+</p>
+
+<p align="center">
   <img src="docs/media/demo-tour.gif" alt="A tour of the live NetWatch TUI: dashboard, connections with process attribution, live packet capture and decode, network topology, and the egress profile of each program" width="820">
 </p>
 
 <p align="center">
-  <em>A quick tour of the live TUI — the dashboard, the program behind every socket, deep packet inspection, the network map, and what each program talks to.</em>
+  <em>…and the default ten-tab instrument underneath it, one <code>V</code> away and sharing the same warm collectors — the dashboard, the program behind every socket, deep packet inspection, the network map, and what each program talks to.</em>
 </p>
 
 ---
@@ -209,15 +217,7 @@ The other direction: when you have a big terminal and want *everything* at once,
 netwatch --view dense     # four boxes, needs 130×44
 ```
 
-<p align="center">
-  <img src="docs/media/demo-dense.gif" alt="NetWatch Dense: four boxes filling a 133×46 terminal — a mirrored braille throughput graph with download above the time axis and upload below it, per-interface rates with 60-second sparklines, four-hop latency budgets, and a connection table whose selected row's detail is hoisted into the top of the same box carrying kernel cwnd / ssthresh / mss / rwnd" width="900">
-</p>
-
-<p align="center">
-  <em>Four boxes, no chrome rows. Download grows up from the axis, upload grows down. The selected connection's detail — including kernel TCP state — sits at the top of the same box, and <code>V</code> is one keypress to the ten-tab view with the collectors still warm.</em>
-</p>
-
-The signature element is the **mirrored dual graph**: download grows up from a centre time axis, upload grows down from the same axis. Traffic symmetry becomes a shape you recognise without reading a number — a download burst is a cliff above the line, a backup job is a cliff below it. Both halves are braille at two samples per character cell, and every cell is coloured by its **height in the graph** rather than by which series it belongs to, so you see a spike's severity before you measure it against the axis.
+That's the screen at the top of this README. The signature element is the **mirrored dual graph**: download grows up from a centre time axis, upload grows down from the same axis. Traffic symmetry becomes a shape you recognise without reading a number — a download burst is a cliff above the line, a backup job is a cliff below it. Both halves are braille at two samples per character cell, and every cell is coloured by its **height in the graph** rather than by which series it belongs to, so you see a spike's severity before you measure it against the axis.
 
 Throughput ramps cool→bright because high bandwidth is *busy*, not *bad* — a saturated link during a backup is working. Only bounded values where high genuinely is bad — link saturation, latency budget per hop — get the green→amber→red treatment, and their meters colour by position along the bar, so the red zone is visible before you reach it.
 

@@ -4,11 +4,11 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
-## [0.29.0] - 2026-08-12
+## [0.29.0] - 2026-08-11
 
 ### Added
 - **Dense view** (`--view dense`, or `V` to cycle, or Settings → View). A
-  fourth answer to "how much terminal do you have": Lite spends 80×24 on one
+  third answer to "how much terminal do you have": Lite spends 80×24 on one
   question, the tabbed TUI spends ten tabs on ten, and Dense spends a large
   terminal on showing everything at once — four boxes, no header bar, no menu
   bar, no status bar. Identity, sort state, page range and every keybind live
@@ -24,13 +24,18 @@ All notable changes to NetWatch will be documented in this file.
   line, a backup job is a cliff below it. Both halves are braille at two
   samples per character cell, and every cell is coloured by its height in the
   plot rather than by which series it belongs to, so a spike's severity is
-  pre-attentive.
+  pre-attentive. The plot carries one sample per sub-column and shifts by
+  exactly one per tick, so it scrolls rather than re-bucketing in place, and
+  its ceiling snaps to 1/2/5 × a power of ten — the scale moves when the
+  traffic does, not every time the peak drifts a few percent.
 - **A split colour vocabulary.** Throughput ramps cool→bright because high
   bandwidth is *busy*, not *bad* — a saturated link during a backup is
   working. Only bounded values where high genuinely is bad (link saturation,
   per-hop latency budget) get green→amber→red, and their meters colour by
   position along the bar, so the red zone is visible before you reach it. Red
   on a bandwidth graph would cry wolf every time you downloaded something.
+  Palette-deferring themes collapse every ramp to a flat token by design,
+  rather than synthesising 24-bit colour the theme exists to avoid.
 - **Kernel TCP state per connection** — `cwnd`, `ssthresh`, `mss`, `rwnd` —
   in the Dense detail row, from `inet_diag` over netlink on Linux and the
   `net.inet.tcp.pcblist64` sysctl on macOS. Throughput tells you what
@@ -39,60 +44,32 @@ All notable changes to NetWatch will be documented in this file.
   distinguishes "the network is congested" from "the peer isn't reading".
   The two kernels disagree about units — Linux counts segments, BSD counts
   bytes — so macOS values are normalised against the MSS and the column means
-  one thing on both. Windows reads `--` until `GetPerTcpConnectionEStats` is
-  wired up.
+  one thing on both. They also spell "threshold not set" differently
+  (`i32::MAX` against BSD's `0x3FFF_C000`); both render `∞`. Windows reads
+  `--` until `GetPerTcpConnectionEStats` is wired up.
 - **Link speed detection**, from `/sys/class/net/*/speed` on Linux and
-  `ifi_baudrate` via `getifaddrs` on macOS. It feeds the saturation meter,
-  which previously had no ceiling to measure against.
-- `V` cycles full → lite → dense; `--view <name>` selects one for a single
-  run; **Settings → View** sets the default. `L` and `--lite` are unchanged.
-- **A recorded demo** (`docs/media/demo-dense.gif`) with its tape and traffic
-  generator checked in, so it can be re-recorded rather than only replaced.
-  The generator uploads as well as downloads — a download-only workload leaves
-  the mirrored graph's lower half flat, which records the headline feature as
-  half a graph.
+  `ifi_baudrate` via `getifaddrs` on macOS, giving the saturation meter a real
+  ceiling to measure against. The ceiling is never allowed below throughput
+  actually measured on the link: a driver claiming the link is slower than
+  traffic it has already carried is wrong, and macOS reports `ifi_baudrate`
+  for Wi-Fi as the idle MCS — one machine advertised 304 Mb while sustaining
+  456 Mb/s over it. The label names which ceiling is in play, because
+  "of 1 Gb link" and "of 472 Mb seen" are different claims.
+- `V` cycles full → lite → dense from any view; `--view <name>` selects one
+  for a single run; **Settings → View** sets the default, live. `L` and
+  `--lite` are unchanged.
+- **A recorded demo** (`docs/media/demo-dense.gif`, now leading the README)
+  with its tape and traffic generator checked in, so it can be re-recorded
+  rather than only replaced. The generator uploads as well as downloads — a
+  download-only workload leaves the mirrored graph's lower half flat, which
+  would record the headline feature as half a graph.
 
 ### Fixed
-- **`V` dead-ended in Lite.** The cycle is advertised in all three views' help
-  screens, but the binding was copy-pasted per key handler and Lite's copy was
-  never written, so pressing `V` there did nothing at all. All three handlers
-  now call one `cycle_view`, and a test walks the cycle so a fourth view can't
-  be added with a dead end.
-- **The dense throughput plot churned instead of scrolling.** It re-divided the
-  entire 600-sample history into new buckets on every tick, so every column was
-  redrawn each frame and the graph shimmered in place. It now carries one
-  sample per sub-column and shifts by exactly one per tick — and the axis stops
-  lying, because the label said `2m` while the plot showed five minutes
-  squeezed into the same width. Plot ceilings also snap to 1/2/5 × a power of
-  ten, so the scale changes when the traffic does rather than every time the
-  peak drifts a few percent.
-- **Dense showed bare IPs where the other views show names.** It split the
-  remote address with its own helper instead of reading the SNI the way Lite
-  does, so a table that should read `ftp.gnu.org` read `209.51.188.20`. The
-  same helper also disagreed with the sparkline cache's key on IPv6 — it
-  stripped the brackets the cache keeps — so every IPv6 row drew a flat
-  baseline as if it were idle. Both now go through the functions that own
-  those spellings.
-- **A long SNI ran under the detail row's TCP internals.** The decoded protocol
-  has no length limit, and the first demo take caught it rendering
-  `HTTPS httpbcwnd 666`. The middle group is now clamped short of the
-  right-aligned internals.
 - **`apply_edit` matched settings rows by bare integer** rather than by the
-  `cursor::` constants that exist to name them. Inserting any row silently
-  re-pointed every editor below it at the wrong setting. Now keyed by the
-  constants, with a test that walks each named cursor to its own field.
-- **A saturation meter measured against a moving denominator.** Comparing
-  current throughput to the busiest second we happen to have observed is a
-  fact about our own sampling, not about the network: every new high
-  re-baselines the meter and yesterday's reading is not comparable to today's.
-  The ceiling is now the link speed where the OS reports one — but never below
-  throughput actually measured, because a driver claiming the link is slower
-  than traffic it has already carried is wrong. (macOS reports `ifi_baudrate`
-  for Wi-Fi as the idle MCS: this machine advertised a 304 Mb link while
-  sustaining 456 Mb/s over it, pinning the meter at 100% for the length of a
-  file copy.) The label names which ceiling is in play, because "of 1 Gb link"
-  and "of 472 Mb seen" are different claims.
-
+  `cursor::` constants that exist to name them, so inserting any row silently
+  re-pointed every editor below it at the wrong setting. Latent until this
+  release added one; now keyed by the constants, with a test that walks each
+  named cursor to its own field.
 
 ## [0.28.2] - 2026-08-10
 
