@@ -40,6 +40,12 @@ jobs:
       # is exactly enough noise to hide a real one. Lints that are genuinely
       # not worth following are declared as `#![allow]` with a reason at the
       # top of src/lib.rs, so a warning reaching CI now means something new.
+      #
+      # The trade: the toolchain is unpinned `stable`, and every Rust release
+      # adds lints, so a bump can turn this red with no code change. That is
+      # the intended failure — a new lint is worth an hour — but it means a red
+      # clippy job on an untouched branch is a toolchain bump, not a
+      # regression. Check `rustc --version` before hunting for a cause.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

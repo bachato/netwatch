@@ -51,7 +51,11 @@ impl MaxMindReader {
         let addr: IpAddr = ip.parse().ok()?;
 
         // Try the City/Country DB first
-        let (country_code, country, city) = if let Some(ref reader) = self.city_reader {
+        // `?` rather than `if let ... else { return None }`: no City/Country
+        // database configured means no lookup is possible, which is the same
+        // early return every other failure here takes.
+        let reader = self.city_reader.as_ref()?;
+        let (country_code, country, city) = {
             let result = reader.lookup(addr).ok()?;
             // Try City decode first (superset of Country)
             if let Some(city_rec) = result.decode::<maxminddb::geoip2::City>().ok().flatten() {
@@ -79,8 +83,6 @@ impl MaxMindReader {
                     .to_string();
                 (cc, cn, String::new())
             }
-        } else {
-            return None;
         };
 
         // Enrich with ASN/org if available

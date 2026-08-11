@@ -91,10 +91,7 @@ fn parse_status(line: &str) -> Option<u16> {
 /// value (may include `:port`), or None if absent / unreadable.
 fn find_host_header(slice: &[u8]) -> Option<String> {
     // Walk lines after the request line.
-    let mut rest = match slice.iter().position(|&b| b == b'\n') {
-        Some(i) => &slice[i + 1..],
-        None => return None,
-    };
+    let mut rest = &slice[slice.iter().position(|&b| b == b'\n')? + 1..];
     loop {
         let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
         let line = &rest[..end];
