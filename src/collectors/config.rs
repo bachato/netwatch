@@ -159,14 +159,14 @@ fn collect_dns() -> Vec<String> {
                 if trimmed.starts_with("DNS Servers")
                     || (trimmed.starts_with("DNS") && trimmed.contains("Server"))
                 {
-                    if let Some(addr) = trimmed.split(':').last() {
+                    if let Some(addr) = trimmed.split(':').next_back() {
                         let addr = addr.trim().to_string();
                         if !addr.is_empty() && !servers.contains(&addr) {
                             servers.push(addr);
                         }
                     }
                 } else if !trimmed.is_empty()
-                    && servers.len() > 0
+                    && !servers.is_empty()
                     && !trimmed.contains(':')
                     && trimmed
                         .chars()
