@@ -81,6 +81,8 @@ cargo install netwatch-tui            # anywhere with Rust
 
 Or grab a pre-built binary from [Releases](https://github.com/matthart1983/netwatch/releases/latest).
 
+**Windows needs [Npcap](https://npcap.com/#download) installed** — without it NetWatch exits at startup with `wpcap.dll was not found`. **Building from source** (`cargo install`, `paru -S netwatch-tui`) needs libpcap's development headers: `libpcap-dev` on Debian/Ubuntu and Alpine, `libpcap-devel` on Fedora/RHEL, `libpcap` on Arch. Missing them shows up as `cannot find -lpcap` at link time. macOS ships libpcap; the `-static` Linux binaries below bundle it and need nothing installed.
+
 The Nix, Arch and Scoop packages are maintained by community packagers — thank you. File
 packaging issues with them; file netwatch bugs here. If a package lags a release, the
 [Repology page](https://repology.org/project/netwatch-tui/versions) shows it.
@@ -96,8 +98,11 @@ packaging issues with them; file netwatch bugs here. If a package lags a release
 | Linux (aarch64, static — Arch/Fedora/Alpine/any distro) | [`netwatch-linux-aarch64-static.tar.gz`](https://github.com/matthart1983/netwatch/releases/latest) |
 | macOS (Intel) | [`netwatch-macos-x86_64.tar.gz`](https://github.com/matthart1983/netwatch/releases/latest) |
 | macOS (Apple Silicon) | [`netwatch-macos-aarch64.tar.gz`](https://github.com/matthart1983/netwatch/releases/latest) |
+| Windows (x86_64) | [`netwatch-windows-x86_64.exe.zip`](https://github.com/matthart1983/netwatch/releases/latest) |
 
 The `-static` Linux builds bundle libpcap and have no runtime dependencies — use these on Arch, Fedora, Alpine, or any distro where the default builds report `libpcap.so.0.8: cannot open shared object file`.
+
+The Windows build requires [Npcap](https://npcap.com/#download) — install it before first run. `wpcap.dll` is a load-time import, so a missing Npcap surfaces as a Windows error box rather than a NetWatch message.
 
 **From source:**
 
@@ -106,7 +111,18 @@ git clone https://github.com/matthart1983/netwatch.git && cd netwatch
 cargo build --release
 ```
 
-**Prerequisites:** Rust 1.70+, libpcap (`sudo apt install libpcap-dev` on Linux, included on macOS).
+**Prerequisites:** Rust 1.70+ and libpcap's development headers. The same applies to `cargo install netwatch-tui`.
+
+| Platform | Install |
+|----------|---------|
+| Debian / Ubuntu | `sudo apt install libpcap-dev` |
+| Fedora / RHEL | `sudo dnf install libpcap-devel` |
+| Arch | `sudo pacman -S libpcap` |
+| Alpine | `sudo apk add libpcap-dev` |
+| macOS | included with the system |
+| Windows | [Npcap](https://npcap.com/#download) — the build fetches the Npcap SDK automatically, or set `NPCAP_SDK` to an extracted copy |
+
+Without them the build fails at link time with `/usr/bin/ld: cannot find -lpcap`. If you only want to run NetWatch rather than build it, the `-static` Linux binaries above need none of this.
 
 </details>
 
