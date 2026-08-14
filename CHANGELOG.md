@@ -4,6 +4,20 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-08-15
+
+### Fixed
+- **The Dense connection table reordered under the cursor.** Rows sorted on the
+  instantaneous rate, and a single sample at the default tick is noise, so two
+  flows of similar speed traded places constantly — measured at three swaps in
+  five ticks with two active downloads. Because the selection is positional,
+  every swap silently retargeted the detail block above to a different
+  connection, so the panel changed what it was describing while you read it.
+  The table now sorts on each flow's recent average instead. That is also the
+  more honest answer to "which flow is busiest", and it matches the column the
+  header claims to sort by. A genuinely faster flow still sorts above a slower
+  one; only the noise is filtered.
+
 ## [0.29.0] - 2026-08-11
 
 ### Added

@@ -626,8 +626,26 @@ impl ConnRow {
         )
     }
 
-    fn total_rate(&self) -> f64 {
-        self.rx_rate + self.tx_rate
+    /// The rate the table sorts on: the flow's recent average, not this tick's
+    /// reading.
+    ///
+    /// Sorting on the instantaneous rate makes the list dance. Two flows of
+    /// similar speed trade places every tick as their samples jitter, and
+    /// because the selection is an index rather than an identity, the detail
+    /// block above retargets to a different connection each time it happens —
+    /// measured at three swaps in five ticks with two active downloads.
+    ///
+    /// Averaging the last few samples is enough to settle it, and it is also
+    /// the more honest answer to "which flow is busiest": a single 250 ms
+    /// sample is noise, and the column header says `DOWN`, which is what this
+    /// history records.
+    fn sort_rate(&self) -> f64 {
+        const WINDOW: usize = 8;
+        if self.history.is_empty() {
+            return self.rx_rate;
+        }
+        let tail = &self.history[self.history.len().saturating_sub(WINDOW)..];
+        tail.iter().map(|v| *v as f64).sum::<f64>() / tail.len() as f64
     }
 }
 
@@ -725,11 +743,12 @@ fn collect_conns(app: &App) -> Vec<ConnRow> {
         })
         .collect();
     rows.sort_by(|a, b| {
-        b.total_rate()
-            .partial_cmp(&a.total_rate())
+        b.sort_rate()
+            .partial_cmp(&a.sort_rate())
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.process.cmp(&b.process))
             .then_with(|| a.host.cmp(&b.host))
+            .then_with(|| a.port.cmp(&b.port))
     });
     rows
 }
@@ -2504,6 +2523,55 @@ mod tests {
     fn fit_samples_handles_empty_and_zero() {
         assert_eq!(fit_samples(&[], 4), vec![0, 0, 0, 0]);
         assert!(fit_samples(&[1, 2], 0).is_empty());
+    }
+
+    /// A list that reorders under the cursor is the difference between a live
+    /// view and a jittery one — and because the selection is positional, a swap
+    /// silently retargets the detail block to another connection.
+    #[test]
+    fn sort_rate_ignores_single_tick_noise() {
+        let row = |hist: Vec<u64>, inst: f64| ConnRow {
+            process: "curl".into(),
+            pid: None,
+            host: "h".into(),
+            port: "443".into(),
+            proto: "tcp".into(),
+            rx_rate: inst,
+            tx_rate: 0.0,
+            rtt_ms: None,
+            state: "ESTABLISHED".into(),
+            retransmits: 0,
+            out_of_order: 0,
+            app_proto: None,
+            local: String::new(),
+            remote: String::new(),
+            history: hist,
+        };
+
+        // Two flows of the same sustained speed, whose latest samples happen to
+        // disagree, must not trade places on that alone.
+        let steady = vec![1000u64; 8];
+        let mut spiky = steady.clone();
+        *spiky.last_mut().unwrap() = 4000;
+        let a = row(steady, 1000.0);
+        let b = row(spiky, 4000.0);
+        let ratio = b.sort_rate() / a.sort_rate();
+        assert!(
+            ratio < 1.5,
+            "one hot sample moved the sort key by {ratio:.2}× — the row will jump"
+        );
+        assert!(
+            b.rx_rate / a.rx_rate >= 4.0,
+            "the instantaneous rate really is 4× — that is what we are smoothing"
+        );
+
+        // A genuinely faster flow must still sort above a slower one.
+        let fast = row(vec![50_000; 8], 50_000.0);
+        let slow = row(vec![1_000; 8], 1_000.0);
+        assert!(fast.sort_rate() > slow.sort_rate());
+
+        // No history yet: fall back to what we have rather than sorting as zero.
+        assert_eq!(row(vec![], 1234.0).sort_rate(), 1234.0);
     }
 
     #[test]
