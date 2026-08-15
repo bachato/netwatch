@@ -4,6 +4,25 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: a default Npcap install failed with "wpcap.dll was not found"**
+  ([#47](https://github.com/matthart1983/netwatch/issues/47)). Npcap 1.x puts
+  its DLLs in `%SystemRoot%\System32\Npcap\` rather than `System32`, so they sit
+  beside a WinPcap install instead of replacing it — and that subdirectory is
+  not on the loader's search path. NetWatch imported `wpcap.dll` at load time,
+  so the process died before `main()` against a Windows message box, and the
+  only cure was reinstalling Npcap with *Install Npcap in WinPcap API-compatible
+  Mode* ticked, which is off by default. The documented procedure — install
+  Npcap, run NetWatch — therefore didn't work.
+
+  `wpcap.dll` is now delay-loaded, and at startup NetWatch adds Npcap's own
+  directory to the DLL search path and loads the library itself, the way
+  Wireshark and nmap handle the same layout. A stock Npcap install works with no
+  checkbox; a machine with no Npcap gets a message naming what to install and
+  where to get it, instead of a modal from the loader. `--version` and `--help`
+  now answer on a machine without Npcap too — they resolve before the check,
+  and previously died with everything else.
+
 ## [0.29.1] - 2026-08-15
 
 ### Fixed

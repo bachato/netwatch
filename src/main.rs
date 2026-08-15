@@ -57,6 +57,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Everything past this point can reach libpcap, so this is where Npcap has
+    // to be resolved on Windows — after the flags that answer without it, so
+    // `--version` and `--help` still work on a machine that has no Npcap at
+    // all. See `platform::npcap` for why the default install needs help being
+    // found, and `build.rs` for why we get to run at all before it loads.
+    #[cfg(target_os = "windows")]
+    if let Err(msg) = netwatch::platform::npcap::ensure_wpcap() {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
+
     // Parse --remote and --api-key for optional metrics streaming. Fall back to
     // env vars so the daemon (e.g. under systemd) can take its endpoint and key
     // from an EnvironmentFile instead of argv — keeping the API key out of `ps`.

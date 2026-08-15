@@ -81,7 +81,7 @@ cargo install netwatch-tui            # anywhere with Rust
 
 Or grab a pre-built binary from [Releases](https://github.com/matthart1983/netwatch/releases/latest).
 
-**Windows needs [Npcap](https://npcap.com/#download) installed** — without it NetWatch exits at startup with `wpcap.dll was not found`. **Building from source** (`cargo install`, `paru -S netwatch-tui`) needs libpcap's development headers: `libpcap-dev` on Debian/Ubuntu and Alpine, `libpcap-devel` on Fedora/RHEL, `libpcap` on Arch. Missing them shows up as `cannot find -lpcap` at link time. macOS ships libpcap; the `-static` Linux binaries below bundle it and need nothing installed.
+**Windows needs [Npcap](https://npcap.com/#download) installed** — the installer's defaults are fine, and without it NetWatch exits at startup saying so. **Building from source** (`cargo install`, `paru -S netwatch-tui`) needs libpcap's development headers: `libpcap-dev` on Debian/Ubuntu and Alpine, `libpcap-devel` on Fedora/RHEL, `libpcap` on Arch. Missing them shows up as `cannot find -lpcap` at link time. macOS ships libpcap; the `-static` Linux binaries below bundle it and need nothing installed.
 
 The Nix, Arch and Scoop packages are maintained by community packagers — thank you. File
 packaging issues with them; file netwatch bugs here. If a package lags a release, the
@@ -102,7 +102,7 @@ packaging issues with them; file netwatch bugs here. If a package lags a release
 
 The `-static` Linux builds bundle libpcap and have no runtime dependencies — use these on Arch, Fedora, Alpine, or any distro where the default builds report `libpcap.so.0.8: cannot open shared object file`.
 
-The Windows build requires [Npcap](https://npcap.com/#download) — install it before first run. `wpcap.dll` is a load-time import, so a missing Npcap surfaces as a Windows error box rather than a NetWatch message.
+The Windows build requires [Npcap](https://npcap.com/#download) — install it before first run. The installer's defaults are fine: NetWatch looks in `System32\Npcap`, where Npcap actually puts `wpcap.dll`, so *Install Npcap in WinPcap API-compatible Mode* is not needed. With no Npcap at all you get a NetWatch message naming what's missing, not a Windows error box. (On v0.29.1 and earlier you did need that checkbox — see [#47](https://github.com/matthart1983/netwatch/issues/47).)
 
 **From source:**
 

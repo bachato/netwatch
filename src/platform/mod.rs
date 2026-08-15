@@ -2,6 +2,10 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// Locating Npcap before the capture path needs it. Windows only, and called
+/// from `main` before anything touches libpcap.
+#[cfg(target_os = "windows")]
+pub mod npcap;
 #[cfg(target_os = "macos")]
 pub mod pktap;
 /// Kernel-derived process identity — every platform, including the fallback

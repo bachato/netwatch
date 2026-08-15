@@ -1,8 +1,37 @@
 fn main() {
     embed_utf8_manifest();
+    delay_load_wpcap();
 
     #[cfg(target_os = "windows")]
     windows::configure_npcap();
+}
+
+/// Delay-load `wpcap.dll` so a missing Npcap is our error to report.
+///
+/// Linked normally, `wpcap.dll` is a load-time import: the loader resolves it
+/// before `main()` runs, and on a machine without Npcap — or with Npcap in its
+/// default location, which isn't on the search path (issue #47) — the process
+/// dies against a Windows message box. Nothing we can print, and `--version`
+/// fails too, which is the one command a user runs to file the bug.
+///
+/// Delay-loading moves that resolution to first use, which lets
+/// [`platform::npcap::ensure_wpcap`] point the loader at Npcap's directory and
+/// load the DLL itself, with a readable failure if it isn't there.
+///
+/// Bins only: the flags belong to the final link, and `delayimp.lib` supplies
+/// the `__delayLoadHelper2` thunk that the `/DELAYLOAD` imports call through.
+/// Keyed on the *target* rather than the host, like the manifest above, so a
+/// cross-compile gets the same treatment; MSVC-only because `/DELAYLOAD` is a
+/// link.exe flag and the GNU toolchain neither needs nor understands it.
+fn delay_load_wpcap() {
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_none() {
+        return;
+    }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    println!("cargo:rustc-link-arg-bins=/DELAYLOAD:wpcap.dll");
+    println!("cargo:rustc-link-arg-bins=delayimp.lib");
 }
 
 /// Embed a Windows application manifest that sets the process **active code
