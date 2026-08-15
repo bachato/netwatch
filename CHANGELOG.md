@@ -4,6 +4,8 @@ All notable changes to NetWatch will be documented in this file.
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-08-16
+
 ### Fixed
 - **Windows: a default Npcap install failed with "wpcap.dll was not found"**
   ([#47](https://github.com/matthart1983/netwatch/issues/47)). Npcap 1.x puts
